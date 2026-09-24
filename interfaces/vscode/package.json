@@ -1,0 +1,23 @@
+{
+  "name": "gh0st-vscode",
+  "displayName": "gh0st",
+  "version": "0.1.0",
+  "publisher": "Judge-M",
+  "engines": {"vscode": "^1.90.0"},
+  "main": "./extension.js",
+  "activationEvents": ["onCommand:gh0st.run", "onCommand:gh0st.status"],
+  "contributes": {
+    "configuration": {
+      "title": "gh0st",
+      "properties": {
+        "gh0st.apiBase": {"type": "string", "default": "http://127.0.0.1:8383", "description": "Local gh0st API URL"},
+        "gh0st.apiToken": {"type": "string", "default": "", "description": "Bearer token when GH0ST_API_TOKEN is set"}
+      }
+    },
+    "commands": [
+      {"command": "gh0st.run", "title": "gh0st: Run Task"},
+      {"command": "gh0st.status", "title": "gh0st: Show Task Status"}
+    ]
+  },
+  "license": "Apache-2.0"
+}

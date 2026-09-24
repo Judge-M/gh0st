@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gh0st Mobile Remote Control & Push Protocol",
+  "description": "Event notifications and action command schemas for the gh0st-relay WebSocket reverse tunnel",
+  "definitions": {
+    "EventType": {
+      "type": "string",
+      "enum": [
+        "task_started",
+        "ticket_dispatched",
+        "turn_completed",
+        "quota_warning",
+        "approval_requested",
+        "task_completed",
+        "task_failed"
+      ]
+    },
+    "ActionType": {
+      "type": "string",
+      "enum": [
+        "approve_grant",
+        "reject_grant",
+        "adjust_budget",
+        "pause_task",
+        "cancel_task"
+        ,"dispatch_task"
+      ]
+    },
+    "RelayEventMessage": {
+      "type": "object",
+      "required": ["event_id", "event_type", "task_id", "timestamp", "payload"],
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "description": "Unique event notification identifier (evt_...)"
+        },
+        "event_type": {
+          "$ref": "#/definitions/EventType"
+        },
+        "device_id": {
+          "type": "string",
+          "description": "Originating gh0st daemon device identifier"
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Root task identifier"
+        },
+        "ticket_id": {
+          "type": "string",
+          "description": "Associated ticket ID (if applicable)"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "prompt": { "type": "string" },
+            "capability": { "type": "string" },
+            "confidence_score": { "type": "number" },
+            "remaining_usd": { "type": "number" },
+            "remaining_tokens": { "type": "integer" },
+            "tokens_used": { "type": "integer" },
+            "cost_usd": { "type": "number" },
+            "approval_type": { "type": "string" },
+            "error_message": { "type": "string" }
+          }
+        }
+      }
+    },
+    "RelayActionCommand": {
+      "type": "object",
+      "required": ["action_id", "action_type", "task_id", "timestamp"],
+      "properties": {
+        "action_id": {
+          "type": "string",
+          "description": "Unique action command identifier (act_...)"
+        },
+        "action_type": {
+          "$ref": "#/definitions/ActionType"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "ticket_id": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "approval_decision": {
+              "type": "string",
+              "enum": ["approved", "rejected"]
+            },
+            "additional_usd": {
+              "type": "number"
+            },
+            "additional_tokens": {
+              "type": "integer"
+            },
+            "reason": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

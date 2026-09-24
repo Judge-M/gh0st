@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gh0st Control</title>
+<style>
+  body { font: 15px system-ui, sans-serif; color: #ecf2ff; background: #0e1628; max-width: 920px; margin: auto; padding: 2rem; }
+  h1 { letter-spacing: .02em; }
+  main { display: grid; gap: 1rem; grid-template-columns: 2fr 1fr; }
+  section { background: #1b2940; border: 1px solid #324762; border-radius: 10px; padding: 1rem; }
+  textarea, input { box-sizing: border-box; width: 100%; background: #0e1628; color: #fff; border: 1px solid #54708f; border-radius: 6px; padding: .7rem; }
+  textarea { min-height: 110px; }
+  button { background: #576ded; color: white; border: 0; border-radius: 6px; padding: .7rem 1rem; margin-top: .6rem; cursor: pointer; }
+  dt { color: #aebcd0; } dd { margin: 0 0 .7rem; font-weight: 600; }
+  #message { white-space: pre-wrap; overflow-wrap: anywhere; }
+  @media(max-width: 680px) { main { grid-template-columns: 1fr; } }
+</style>
+<h1>gh0st Control</h1>
+<p id="health">Checking local daemon…</p>
+<main>
+  <section>
+    <h2>New task</h2>
+    <label for="prompt">Objective</label>
+    <textarea id="prompt"></textarea>
+    <button id="dispatch">Dispatch</button>
+    <p id="message" role="status"></p>
+  </section>
+  <section>
+    <h2>Task status</h2>
+    <dl><dt>Task</dt><dd id="task-id">—</dd><dt>Status</dt><dd id="task-status">—</dd><dt>Remaining tokens</dt><dd id="tokens">—</dd><dt>Remaining USD</dt><dd id="usd">—</dd></dl>
+  </section>
+</main>
+<script>
+const api = 'http://127.0.0.1:8383';
+let taskId = null;
+let poller = null;
+async function request(path, options) {
+  const response = await fetch(api + path, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+  return data;
+}
+async function refresh() {
+  if (!taskId) return;
+  try {
+    const data = await request(`/v1/status?task_id=${encodeURIComponent(taskId)}`);
+    document.getElementById('task-status').textContent = data.status;
+    document.getElementById('tokens').textContent = data.quota.remaining_tokens.toLocaleString();
+    document.getElementById('usd').textContent = '$' + data.quota.remaining_usd.toFixed(4);
+    if (['completed', 'failed', 'halted'].includes(data.status)) { clearInterval(poller); poller = null; }
+  } catch (error) { document.getElementById('message').textContent = error.message; }
+}
+document.getElementById('dispatch').addEventListener('click', async () => {
+  const prompt = document.getElementById('prompt').value.trim();
+  if (!prompt) return;
+  try {
+    const data = await request('/v1/run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({prompt})});
+    taskId = data.task_id;
+    document.getElementById('task-id').textContent = taskId;
+    document.getElementById('message').textContent = `Dispatched ${data.decision.selected_capability}`;
+    if (poller) clearInterval(poller);
+    poller = setInterval(refresh, 2000);
+    refresh();
+  } catch (error) { document.getElementById('message').textContent = error.message; }
+});
+request('/v1/health').then(() => document.getElementById('health').textContent = 'Local daemon connected').catch(() => document.getElementById('health').textContent = 'Start gh0st api on port 8383');
+</script>
+</html>

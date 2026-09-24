@@ -1,0 +1,83 @@
+openapi: 3.1.0
+info:
+  title: gh0st Local Control API
+  version: 0.1.0
+servers:
+  - url: http://127.0.0.1:8383
+paths:
+  /v1/health:
+    get:
+      summary: Check local daemon health
+      responses:
+        '200':
+          description: Daemon is running
+  /v1/run:
+    post:
+      summary: Route a task and queue its worker
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [prompt]
+              properties:
+                prompt: {type: string, minLength: 1}
+                task_id: {type: string}
+                max_budget_usd: {type: number, exclusiveMinimum: 0, default: 5}
+                max_budget_tokens: {type: integer, minimum: 1, default: 100000}
+      responses:
+        '202':
+          description: Task dispatched
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: {type: string}
+                  status: {const: dispatched}
+                  ticket_id: {type: string}
+                  decision:
+                    type: object
+                    properties:
+                      selected_capability: {type: string}
+                      confidence_score: {type: number}
+                      execution_tier: {type: string}
+                      compute_placement: {type: string}
+                      attached_tool: {type: string}
+                      requires_planner: {type: boolean}
+  /v1/status:
+    get:
+      summary: Read task progress and quota
+      parameters:
+        - name: task_id
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Current task status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id: {type: string}
+                  status: {type: string, enum: [active, completed, failed, halted]}
+                  quota:
+                    type: object
+                    properties:
+                      tokens_consumed: {type: integer}
+                      remaining_tokens: {type: integer}
+                      cost_usd_consumed: {type: number}
+                      remaining_usd: {type: number}
+                  pending_tickets_count: {type: integer}
+                  trusted_memory_count: {type: integer}
+                  tickets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        ticket_id: {type: string}
+                        status: {type: string}
+                        capability: {type: string}

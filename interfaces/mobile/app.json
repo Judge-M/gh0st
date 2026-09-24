@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "gh0st Mobile",
+    "slug": "gh0st-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "org.cyberexperts.gh0st"
+    },
+    "android": {
+      "package": "org.cyberexperts.gh0st",
+      "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE"
+      ]
+    },
+    "web": {}
+  }
+}
