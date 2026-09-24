@@ -37,6 +37,8 @@ export GH0ST_GATEWAY_API_KEY=your-gateway-key
 
 The SQLite database defaults to `~/.gh0st/state.db`. Pass `--db-url sqlite:///path/to/state.db` before a CLI subcommand to use another location.
 
+To use a separately hosted classifier, set `GH0ST_ROUTER_MODEL=jev` and `GH0ST_ROUTER_ENDPOINT=https://your-classifier.example/classify`. Its JSON response must contain `capability` and `confidence`; `GH0ST_ROUTER_API_KEY` is optional. The default `layla` route stays local.
+
 ## CLI
 
 ```bash

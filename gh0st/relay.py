@@ -1,6 +1,7 @@
 """Loopback control API and optional outbound relay connection."""
 
 import asyncio
+import argparse
 import json
 import os
 from pathlib import Path
@@ -43,7 +44,7 @@ def create_app(db: Optional[StateLedger] = None) -> FastAPI:
     @app.get("/v1/health")
     def health(authorization: Optional[str] = Header(default=None)):
         authorize(authorization)
-        return {"status": "ok", "default_classifier": "layla",
+        return {"status": "ok", "default_classifier": os.getenv("GH0ST_ROUTER_MODEL", "layla"),
                 "gateway_target": os.getenv("GH0ST_GATEWAY_URL", "http://127.0.0.1:4000/v1")}
 
     @app.post("/v1/run", status_code=202)
@@ -117,3 +118,24 @@ class CloudRelayClient:
                             await socket.send(json.dumps({"message_type": "pong", "device_id": self.device_id}))
             except (OSError, ValueError):
                 await asyncio.sleep(5)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the gh0st local API")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8383)
+    parser.add_argument("--device-id", default="local")
+    args = parser.parse_args()
+    if args.host not in {"127.0.0.1", "localhost", "::1"} and not os.getenv("GH0ST_API_TOKEN"):
+        parser.error("Set GH0ST_API_TOKEN before binding beyond loopback")
+    relay_url = os.getenv("GH0ST_RELAY_URL", "")
+    relay_token = os.getenv("GH0ST_RELAY_TOKEN", "")
+    if relay_url:
+        client = CloudRelayClient(relay_url, args.device_id, relay_token)
+        threading.Thread(target=lambda: asyncio.run(client.run()), daemon=True).start()
+    import uvicorn
+    uvicorn.run(create_app(), host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()

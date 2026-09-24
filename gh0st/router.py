@@ -5,6 +5,7 @@ import os
 import re
 from typing import Optional
 
+import httpx
 from pydantic import BaseModel, Field
 
 from .db import StateLedger
@@ -71,10 +72,46 @@ class LaylaClassifier(System1Classifier):
         return ranked[0][1], min(0.98, 0.85 + ranked[0][0] * 0.05)
 
 
+class EndpointClassifier(System1Classifier):
+    """Adapter for a separately hosted classification endpoint."""
+
+    def __init__(self, endpoint: str, api_key: str = ""):
+        if not endpoint.startswith(("https://", "http://127.0.0.1:", "http://localhost:")):
+            raise ValueError("Router endpoint must use HTTPS or loopback HTTP")
+        self.endpoint = endpoint
+        self.api_key = api_key
+
+    def classify(self, prompt: str, templates: list[CapabilityTemplate]) -> tuple[str, float]:
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        payload = {"prompt": prompt, "templates": [
+            {"capability_name": item.capability_name, "description": item.description}
+            for item in templates]}
+        with httpx.Client(timeout=2.0) as client:
+            response = client.post(self.endpoint, json=payload, headers=headers)
+            response.raise_for_status()
+            decision = response.json()
+        capability = str(decision["capability"])
+        confidence = float(decision["confidence"])
+        if not 0 <= confidence <= 1:
+            raise ValueError("Classifier confidence must be between zero and one")
+        return capability, confidence
+
+
 class System1Router:
     def __init__(self, db: StateLedger, classifier: Optional[System1Classifier] = None, registry: Optional[TemplateRegistry] = None):
         self.db = db
-        self.classifier = classifier or LaylaClassifier()
+        if classifier is None:
+            selected = os.getenv("GH0ST_ROUTER_MODEL", "layla").casefold()
+            if selected == "layla":
+                classifier = LaylaClassifier()
+            elif selected == "jev":
+                endpoint = os.getenv("GH0ST_ROUTER_ENDPOINT", "")
+                if not endpoint:
+                    raise ValueError("GH0ST_ROUTER_ENDPOINT is required for the jev router")
+                classifier = EndpointClassifier(endpoint, os.getenv("GH0ST_ROUTER_API_KEY", ""))
+            else:
+                raise ValueError(f"Unsupported router model: {selected}")
+        self.classifier = classifier
         self.registry = registry or TemplateRegistry()
 
     def route(self, prompt: str, task_id: str, parent_ticket_id: Optional[str] = None,

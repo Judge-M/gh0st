@@ -12,6 +12,7 @@ from gh0st.db import StateLedger
 from gh0st.models import MemoryClaim, QuotaRecord
 from gh0st.relay import create_app
 from gh0st.router import System1Router
+from gh0st.router import EndpointClassifier
 from gh0st.worker import EphemeralWorker
 
 
@@ -56,6 +57,24 @@ def test_quota_blocks_dispatch(tmp_path):
     decision, ticket = System1Router(db).route("Refactor code", "task_test")
     assert ticket is None
     assert decision.selected_capability == "none"
+
+
+def test_external_router_requires_config(tmp_path, monkeypatch):
+    db = ledger(tmp_path)
+    monkeypatch.setenv("GH0ST_ROUTER_MODEL", "jev")
+    monkeypatch.delenv("GH0ST_ROUTER_ENDPOINT", raising=False)
+    try:
+        System1Router(db)
+    except ValueError as error:
+        assert "GH0ST_ROUTER_ENDPOINT" in str(error)
+    else:
+        raise AssertionError("Missing external router endpoint was accepted")
+    try:
+        EndpointClassifier("http://example.com/classify")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Insecure remote classifier endpoint was accepted")
 
 
 def test_planner_child_reenters_router(tmp_path):
