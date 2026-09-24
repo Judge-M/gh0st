@@ -24,6 +24,9 @@ paths:
               properties:
                 prompt: {type: string, minLength: 1}
                 task_id: {type: string}
+                source_repo: {type: string, description: Local repository cloned into a task workspace}
+                model: {type: string, description: Explicit configured model target override}
+                modality: {type: string, enum: [text, code, vision, image]}
                 max_budget_usd: {type: number, exclusiveMinimum: 0, default: 5}
                 max_budget_tokens: {type: integer, minimum: 1, default: 100000}
       responses:
@@ -41,6 +44,7 @@ paths:
                     type: object
                     properties:
                       selected_capability: {type: string}
+                      selected_model: {type: string}
                       confidence_score: {type: number}
                       execution_tier: {type: string}
                       compute_placement: {type: string}
@@ -68,8 +72,10 @@ paths:
                     type: object
                     properties:
                       tokens_consumed: {type: integer}
+                      tokens_reserved: {type: integer}
                       remaining_tokens: {type: integer}
                       cost_usd_consumed: {type: number}
+                      cost_usd_reserved: {type: number}
                       remaining_usd: {type: number}
                   pending_tickets_count: {type: integer}
                   trusted_memory_count: {type: integer}
@@ -81,3 +87,37 @@ paths:
                         ticket_id: {type: string}
                         status: {type: string}
                         capability: {type: string}
+                        report: {type: [object, 'null']}
+                  grant_requests:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        grant_id: {type: string}
+                        action_type: {type: string}
+                        status: {type: string, enum: [pending, approved, rejected]}
+                        decided_by: {type: [string, 'null']}
+  /v1/grants/{grant_id}/decision:
+    post:
+      summary: Record an operator decision for a proposed external action
+      description: This records approval or rejection; it does not execute the external action.
+      parameters:
+        - name: grant_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approved, operator_id]
+              properties:
+                approved: {type: boolean}
+                operator_id: {type: string, minLength: 1}
+      responses:
+        '200':
+          description: Decision recorded
+        '409':
+          description: Grant not found or already decided

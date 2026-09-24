@@ -17,6 +17,7 @@ class TicketStatus(str, Enum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    HALTED = "halted"
     CANCELLED = "cancelled"
 
 
@@ -63,6 +64,11 @@ class Ticket(BaseModel):
     objective: str = Field(description="Specific bounded objective for this worker turn")
     constraints: List[str] = Field(default_factory=list, description="Execution boundaries or rules")
     context_slice: Dict[str, Any] = Field(default_factory=dict, description="Minimal context payload")
+    workspace_path: str = Field(description="Absolute path to this task's isolated workspace")
+    source_commit: Optional[str] = Field(default=None, description="Commit copied into the task workspace")
+    permitted_local_capabilities: List[str] = Field(default_factory=lambda: ["local_shell"])
+    gateway_allowance: Dict[str, Any] = Field(default_factory=dict)
+    assigned_model: str = Field(default="")
 
     # 1-Schema Rule
     attached_tool_schema: Optional[ToolSchema] = Field(default=None, description="Strictly 1 tool schema attached by System-1")
@@ -84,6 +90,10 @@ class WorkerReport(BaseModel):
     output: Dict[str, Any] = Field(default_factory=dict, description="Structured execution result")
     stdout: str = Field(default="", description="Captured standard output")
     stderr: str = Field(default="", description="Captured error log")
+    diff: str = Field(default="", description="Workspace diff against the source commit")
+    commands_executed: List[Dict[str, Any]] = Field(default_factory=list)
+    test_results: List[Dict[str, Any]] = Field(default_factory=list)
+    unresolved_failures: List[str] = Field(default_factory=list)
     tokens_used: int = Field(default=0, ge=0, description="Actual tokens consumed")
     cost_usd: float = Field(default=0.0, ge=0, description="Actual cost incurred")
 
@@ -101,17 +111,31 @@ class QuotaRecord(BaseModel):
     task_id: str = Field(description="Root task identifier")
     max_tokens_budget: int = Field(ge=1, description="Total token ceiling")
     tokens_consumed: int = Field(default=0, ge=0, description="Tokens used so far")
+    tokens_reserved: int = Field(default=0, ge=0)
     max_cost_usd_budget: float = Field(ge=0, description="Total cost cap in USD")
     cost_usd_consumed: float = Field(default=0.0, ge=0, description="USD spent so far")
+    cost_usd_reserved: float = Field(default=0.0, ge=0)
     is_active: bool = Field(default=True)
 
     @property
     def remaining_tokens(self) -> int:
-        return max(0, self.max_tokens_budget - self.tokens_consumed)
+        return max(0, self.max_tokens_budget - self.tokens_consumed - self.tokens_reserved)
 
     @property
     def remaining_usd(self) -> float:
-        return max(0.0, self.max_cost_usd_budget - self.cost_usd_consumed)
+        return max(0.0, self.max_cost_usd_budget - self.cost_usd_consumed - self.cost_usd_reserved)
+
+
+class GrantRequest(BaseModel):
+    grant_id: str = Field(default_factory=lambda: f"grt_{uuid.uuid4().hex[:12]}")
+    task_id: str
+    ticket_id: str
+    action_type: str
+    details: Dict[str, Any] = Field(default_factory=dict)
+    status: str = Field(default="pending")
+    decided_by: Optional[str] = None
+    decided_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class MemoryClaim(BaseModel):
@@ -130,6 +154,7 @@ class System1Decision(BaseModel):
     prompt: str
     confidence_score: float = Field(ge=0.0, le=1.0)
     selected_capability: str
+    selected_model: Optional[str] = None
     execution_tier: ExecutionTier
     compute_placement: ComputePlacement
     attached_tool_schema: Optional[ToolSchema] = None
