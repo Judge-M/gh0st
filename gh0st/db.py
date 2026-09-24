@@ -19,12 +19,15 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    inspect,
+    update,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker, Session
 
 from .models import (
     ClaimValidity,
     ChildTicketProposal,
+    GrantRequest,
     MemoryClaim,
     QuotaRecord,
     Ticket,
@@ -65,6 +68,11 @@ class TicketRow(Base):
     objective: Mapped[str] = mapped_column(Text, nullable=False)
     constraints_json: Mapped[str] = mapped_column(Text, default="[]")
     context_slice_json: Mapped[str] = mapped_column(Text, default="{}")
+    workspace_path: Mapped[str] = mapped_column(Text, default="")
+    source_commit: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    permitted_local_capabilities_json: Mapped[str] = mapped_column(Text, default='["local_shell"]')
+    gateway_allowance_json: Mapped[str] = mapped_column(Text, default="{}")
+    assigned_model: Mapped[str] = mapped_column(Text, default="")
     attached_tool_schema_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     max_tokens_allocated: Mapped[int] = mapped_column(Integer, default=4096)
     max_cost_usd: Mapped[float] = mapped_column(Float, default=0.50)
@@ -84,6 +92,10 @@ class WorkerReportRow(Base):
     output_json: Mapped[str] = mapped_column(Text, default="{}")
     stdout: Mapped[str] = mapped_column(Text, default="")
     stderr: Mapped[str] = mapped_column(Text, default="")
+    diff: Mapped[str] = mapped_column(Text, default="")
+    commands_executed_json: Mapped[str] = mapped_column(Text, default="[]")
+    test_results_json: Mapped[str] = mapped_column(Text, default="[]")
+    unresolved_failures_json: Mapped[str] = mapped_column(Text, default="[]")
     tokens_used: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     child_proposals_json: Mapped[str] = mapped_column(Text, default="[]")
@@ -99,8 +111,10 @@ class QuotaRecordRow(Base):
     task_id: Mapped[str] = mapped_column(String(64), ForeignKey("tasks.task_id"), unique=True, index=True)
     max_tokens_budget: Mapped[int] = mapped_column(Integer, nullable=False)
     tokens_consumed: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_reserved: Mapped[int] = mapped_column(Integer, default=0)
     max_cost_usd_budget: Mapped[float] = mapped_column(Float, nullable=False)
     cost_usd_consumed: Mapped[float] = mapped_column(Float, default=0.0)
+    cost_usd_reserved: Mapped[float] = mapped_column(Float, default=0.0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -119,6 +133,20 @@ class MemoryClaimRow(Base):
     )
 
 
+class GrantRequestRow(Base):
+    __tablename__ = "grant_requests"
+
+    grant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(64), ForeignKey("tasks.task_id"), index=True)
+    ticket_id: Mapped[str] = mapped_column(String(64), ForeignKey("tickets.ticket_id"), index=True)
+    action_type: Mapped[str] = mapped_column(String(64))
+    details_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    decided_by: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
 class StateLedger:
     """State Ledger Manager for gh0st, providing SQLite persistence for tickets, reports, quotas, and claims."""
 
@@ -132,8 +160,38 @@ class StateLedger:
         self.SessionLocal = sessionmaker(bind=self.engine)
 
     def init_db(self):
-        """Create database tables if they do not exist."""
+        """Create tables and add the Phase 1 columns to existing SQLite ledgers."""
         Base.metadata.create_all(bind=self.engine)
+        if self.engine.dialect.name == "sqlite":
+            additions = {
+                "tickets": {
+                    "workspace_path": "TEXT NOT NULL DEFAULT ''",
+                    "source_commit": "VARCHAR(64)",
+                    "permitted_local_capabilities_json": "TEXT NOT NULL DEFAULT '[\"local_shell\"]'",
+                    "gateway_allowance_json": "TEXT NOT NULL DEFAULT '{}'",
+                    "assigned_model": "TEXT NOT NULL DEFAULT ''",
+                },
+                "worker_reports": {
+                    "diff": "TEXT NOT NULL DEFAULT ''",
+                    "commands_executed_json": "TEXT NOT NULL DEFAULT '[]'",
+                    "test_results_json": "TEXT NOT NULL DEFAULT '[]'",
+                    "unresolved_failures_json": "TEXT NOT NULL DEFAULT '[]'",
+                },
+                "quota_records": {
+                    "tokens_reserved": "INTEGER NOT NULL DEFAULT 0",
+                    "cost_usd_reserved": "FLOAT NOT NULL DEFAULT 0",
+                },
+                "grant_requests": {
+                    "decided_by": "VARCHAR(128)",
+                    "decided_at": "DATETIME",
+                },
+            }
+            with self.engine.begin() as connection:
+                for table, columns in additions.items():
+                    existing = {column["name"] for column in inspect(connection).get_columns(table)}
+                    for column, definition in columns.items():
+                        if column not in existing:
+                            connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def get_session(self) -> Session:
         return self.SessionLocal()
@@ -167,8 +225,10 @@ class StateLedger:
                 task_id=quota.task_id,
                 max_tokens_budget=quota.max_tokens_budget,
                 tokens_consumed=quota.tokens_consumed,
+                tokens_reserved=quota.tokens_reserved,
                 max_cost_usd_budget=quota.max_cost_usd_budget,
                 cost_usd_consumed=quota.cost_usd_consumed,
+                cost_usd_reserved=quota.cost_usd_reserved,
                 is_active=quota.is_active,
             )
             session.add(row)
@@ -185,8 +245,10 @@ class StateLedger:
                 task_id=row.task_id,
                 max_tokens_budget=row.max_tokens_budget,
                 tokens_consumed=row.tokens_consumed,
+                tokens_reserved=row.tokens_reserved,
                 max_cost_usd_budget=row.max_cost_usd_budget,
                 cost_usd_consumed=row.cost_usd_consumed,
+                cost_usd_reserved=row.cost_usd_reserved,
                 is_active=row.is_active,
             )
 
@@ -204,36 +266,67 @@ class StateLedger:
                 task_id=row.task_id,
                 max_tokens_budget=row.max_tokens_budget,
                 tokens_consumed=row.tokens_consumed,
+                tokens_reserved=row.tokens_reserved,
                 max_cost_usd_budget=row.max_cost_usd_budget,
                 cost_usd_consumed=row.cost_usd_consumed,
+                cost_usd_reserved=row.cost_usd_reserved,
                 is_active=row.is_active,
             )
 
     # --- Ticket Operations ---
     def create_ticket(self, ticket: Ticket) -> Ticket:
         with self.get_session() as session:
-            attached_tool_json = (
-                ticket.attached_tool_schema.model_dump_json()
-                if ticket.attached_tool_schema
-                else None
-            )
-            row = TicketRow(
-                ticket_id=ticket.ticket_id,
-                task_id=ticket.task_id,
-                parent_ticket_id=ticket.parent_ticket_id,
-                depth=ticket.depth,
-                capability=ticket.capability,
-                objective=ticket.objective,
-                constraints_json=json.dumps(ticket.constraints),
-                context_slice_json=json.dumps(ticket.context_slice),
-                attached_tool_schema_json=attached_tool_json,
-                max_tokens_allocated=ticket.max_tokens_allocated,
-                max_cost_usd=ticket.max_cost_usd,
-                status=ticket.status.value,
-            )
-            session.add(row)
-            session.commit()
-            return ticket
+            with session.begin():
+                reservation = session.execute(
+                    update(QuotaRecordRow)
+                    .where(
+                        QuotaRecordRow.task_id == ticket.task_id,
+                        QuotaRecordRow.is_active.is_(True),
+                        QuotaRecordRow.max_tokens_budget - QuotaRecordRow.tokens_consumed - QuotaRecordRow.tokens_reserved >= ticket.max_tokens_allocated,
+                        QuotaRecordRow.max_cost_usd_budget - QuotaRecordRow.cost_usd_consumed - QuotaRecordRow.cost_usd_reserved >= ticket.max_cost_usd,
+                    )
+                    .values(
+                        tokens_reserved=QuotaRecordRow.tokens_reserved + ticket.max_tokens_allocated,
+                        cost_usd_reserved=QuotaRecordRow.cost_usd_reserved + ticket.max_cost_usd,
+                    )
+                )
+                if reservation.rowcount != 1:
+                    raise ValueError("Insufficient unreserved task budget")
+                session.add(TicketRow(
+                    ticket_id=ticket.ticket_id, task_id=ticket.task_id,
+                    parent_ticket_id=ticket.parent_ticket_id, depth=ticket.depth,
+                    capability=ticket.capability, objective=ticket.objective,
+                    constraints_json=json.dumps(ticket.constraints),
+                    context_slice_json=json.dumps(ticket.context_slice),
+                    workspace_path=ticket.workspace_path,
+                    source_commit=ticket.source_commit,
+                    permitted_local_capabilities_json=json.dumps(ticket.permitted_local_capabilities),
+                    gateway_allowance_json=json.dumps(ticket.gateway_allowance),
+                    assigned_model=ticket.assigned_model,
+                    attached_tool_schema_json=(ticket.attached_tool_schema.model_dump_json() if ticket.attached_tool_schema else None),
+                    max_tokens_allocated=ticket.max_tokens_allocated,
+                    max_cost_usd=ticket.max_cost_usd, status=ticket.status.value,
+                ))
+        return ticket
+
+    @staticmethod
+    def _ticket_from_row(row: TicketRow) -> Ticket:
+        return Ticket(
+            ticket_id=row.ticket_id, task_id=row.task_id,
+            parent_ticket_id=row.parent_ticket_id, depth=row.depth,
+            capability=row.capability, objective=row.objective,
+            constraints=json.loads(row.constraints_json),
+            context_slice=json.loads(row.context_slice_json),
+            workspace_path=row.workspace_path,
+            source_commit=row.source_commit,
+            permitted_local_capabilities=json.loads(row.permitted_local_capabilities_json),
+            gateway_allowance=json.loads(row.gateway_allowance_json),
+            assigned_model=row.assigned_model,
+            attached_tool_schema=(ToolSchema.model_validate_json(row.attached_tool_schema_json) if row.attached_tool_schema_json else None),
+            max_tokens_allocated=row.max_tokens_allocated,
+            max_cost_usd=row.max_cost_usd,
+            status=TicketStatus(row.status), created_at=row.created_at,
+        )
 
     def get_ticket(self, ticket_id: str) -> Optional[Ticket]:
         with self.get_session() as session:
@@ -241,26 +334,7 @@ class StateLedger:
             if not row:
                 return None
 
-            tool_schema = (
-                ToolSchema(**json.loads(row.attached_tool_schema_json))
-                if row.attached_tool_schema_json
-                else None
-            )
-            return Ticket(
-                ticket_id=row.ticket_id,
-                task_id=row.task_id,
-                parent_ticket_id=row.parent_ticket_id,
-                depth=row.depth,
-                capability=row.capability,
-                objective=row.objective,
-                constraints=json.loads(row.constraints_json),
-                context_slice=json.loads(row.context_slice_json),
-                attached_tool_schema=tool_schema,
-                max_tokens_allocated=row.max_tokens_allocated,
-                max_cost_usd=row.max_cost_usd,
-                status=TicketStatus(row.status),
-                created_at=row.created_at,
-            )
+            return self._ticket_from_row(row)
 
     def list_pending_tickets(self, limit: int = 10) -> List[Ticket]:
         with self.get_session() as session:
@@ -271,31 +345,7 @@ class StateLedger:
                 .limit(limit)
                 .all()
             )
-            tickets = []
-            for row in rows:
-                tool_schema = (
-                    ToolSchema(**json.loads(row.attached_tool_schema_json))
-                    if row.attached_tool_schema_json
-                    else None
-                )
-                tickets.append(
-                    Ticket(
-                        ticket_id=row.ticket_id,
-                        task_id=row.task_id,
-                        parent_ticket_id=row.parent_ticket_id,
-                        depth=row.depth,
-                        capability=row.capability,
-                        objective=row.objective,
-                        constraints=json.loads(row.constraints_json),
-                        context_slice=json.loads(row.context_slice_json),
-                        attached_tool_schema=tool_schema,
-                        max_tokens_allocated=row.max_tokens_allocated,
-                        max_cost_usd=row.max_cost_usd,
-                        status=TicketStatus(row.status),
-                        created_at=row.created_at,
-                    )
-                )
-            return tickets
+            return [self._ticket_from_row(row) for row in rows]
 
     def list_task_tickets(self, task_id: str) -> List[Ticket]:
         with self.get_session() as session:
@@ -311,44 +361,50 @@ class StateLedger:
             session.commit()
             return True
 
+    def claim_ticket(self, ticket_id: str) -> bool:
+        with self.get_session() as session:
+            with session.begin():
+                result = session.execute(
+                    update(TicketRow)
+                    .where(TicketRow.ticket_id == ticket_id, TicketRow.status == TicketStatus.PENDING.value)
+                    .values(status=TicketStatus.RUNNING.value)
+                )
+                return result.rowcount == 1
+
     # --- Worker Report Operations ---
     def save_worker_report(self, report: WorkerReport) -> WorkerReport:
         with self.get_session() as session:
-            if session.query(WorkerReportRow).filter(WorkerReportRow.ticket_id == report.ticket_id).first():
-                raise ValueError(f"Report already exists for {report.ticket_id}")
-            proposals_json = json.dumps(
-                [p.model_dump() for p in report.child_ticket_proposals]
-            )
-            row = WorkerReportRow(
-                report_id=report.report_id,
-                ticket_id=report.ticket_id,
-                task_id=report.task_id,
-                status=report.status,
-                output_json=json.dumps(report.output),
-                stdout=report.stdout,
-                stderr=report.stderr,
-                tokens_used=report.tokens_used,
-                cost_usd=report.cost_usd,
-                child_proposals_json=proposals_json,
-            )
-            session.add(row)
-            session.commit()
-
-            # Automatically update ticket status and quota consumption
-            ticket_status = (
-                TicketStatus.COMPLETED if report.status == "success" else TicketStatus.FAILED
-            )
-            row_ticket = session.query(TicketRow).filter(TicketRow.ticket_id == report.ticket_id).first()
-            if row_ticket:
-                row_ticket.status = ticket_status.value
-
-            row_quota = session.query(QuotaRecordRow).filter(QuotaRecordRow.task_id == report.task_id).first()
-            if row_quota:
-                row_quota.tokens_consumed += max(0, report.tokens_used)
-                row_quota.cost_usd_consumed += max(0.0, report.cost_usd)
-
-            session.commit()
-            return report
+            with session.begin():
+                ticket = session.get(TicketRow, report.ticket_id)
+                if ticket is None or ticket.task_id != report.task_id or ticket.status != TicketStatus.RUNNING.value:
+                    raise ValueError("Ticket is not claimed by this task")
+                session.add(WorkerReportRow(
+                    report_id=report.report_id, ticket_id=report.ticket_id,
+                    task_id=report.task_id, status=report.status,
+                    output_json=json.dumps(report.output), stdout=report.stdout,
+                    stderr=report.stderr, diff=report.diff,
+                    commands_executed_json=json.dumps(report.commands_executed),
+                    test_results_json=json.dumps(report.test_results),
+                    unresolved_failures_json=json.dumps(report.unresolved_failures),
+                    tokens_used=report.tokens_used, cost_usd=report.cost_usd,
+                    child_proposals_json=json.dumps([p.model_dump() for p in report.child_ticket_proposals]),
+                ))
+                ticket.status = (
+                    TicketStatus.COMPLETED.value if report.status == "success" else
+                    TicketStatus.HALTED.value if report.status == "halted" else
+                    TicketStatus.FAILED.value
+                )
+                session.execute(
+                    update(QuotaRecordRow)
+                    .where(QuotaRecordRow.task_id == report.task_id)
+                    .values(
+                        tokens_consumed=QuotaRecordRow.tokens_consumed + report.tokens_used,
+                        cost_usd_consumed=QuotaRecordRow.cost_usd_consumed + report.cost_usd,
+                        tokens_reserved=QuotaRecordRow.tokens_reserved - ticket.max_tokens_allocated,
+                        cost_usd_reserved=QuotaRecordRow.cost_usd_reserved - ticket.max_cost_usd,
+                    )
+                )
+        return report
 
     def get_worker_report(self, ticket_id: str) -> Optional[WorkerReport]:
         with self.get_session() as session:
@@ -367,10 +423,58 @@ class StateLedger:
                 output=json.loads(row.output_json),
                 stdout=row.stdout,
                 stderr=row.stderr,
+                diff=row.diff,
+                commands_executed=json.loads(row.commands_executed_json),
+                test_results=json.loads(row.test_results_json),
+                unresolved_failures=json.loads(row.unresolved_failures_json),
                 tokens_used=row.tokens_used,
                 cost_usd=row.cost_usd,
                 child_ticket_proposals=proposals,
                 completed_at=row.completed_at,
+            )
+
+    def save_grant_request(self, grant: GrantRequest) -> GrantRequest:
+        with self.get_session() as session:
+            with session.begin():
+                session.add(GrantRequestRow(
+                    grant_id=grant.grant_id, task_id=grant.task_id,
+                    ticket_id=grant.ticket_id, action_type=grant.action_type,
+                    details_json=json.dumps(grant.details), status=grant.status,
+                ))
+        return grant
+
+    def list_grant_requests(self, task_id: str) -> List[GrantRequest]:
+        with self.get_session() as session:
+            rows = session.query(GrantRequestRow).filter(GrantRequestRow.task_id == task_id).order_by(GrantRequestRow.created_at).all()
+            return [GrantRequest(
+                grant_id=row.grant_id, task_id=row.task_id,
+                ticket_id=row.ticket_id, action_type=row.action_type,
+                details=json.loads(row.details_json), status=row.status,
+                decided_by=row.decided_by, decided_at=row.decided_at,
+                created_at=row.created_at,
+            ) for row in rows]
+
+    def decide_grant_request(self, grant_id: str, approved: bool, operator_id: str) -> GrantRequest:
+        if not operator_id.strip():
+            raise ValueError("An operator identity is required")
+        decided_at = datetime.now(timezone.utc)
+        with self.get_session() as session:
+            with session.begin():
+                result = session.execute(
+                    update(GrantRequestRow)
+                    .where(GrantRequestRow.grant_id == grant_id, GrantRequestRow.status == "pending")
+                    .values(status="approved" if approved else "rejected",
+                            decided_by=operator_id, decided_at=decided_at)
+                )
+                if result.rowcount != 1:
+                    raise ValueError("Grant request does not exist or has already been decided")
+        with self.get_session() as session:
+            row = session.get(GrantRequestRow, grant_id)
+            return GrantRequest(
+                grant_id=row.grant_id, task_id=row.task_id, ticket_id=row.ticket_id,
+                action_type=row.action_type, details=json.loads(row.details_json),
+                status=row.status, decided_by=row.decided_by, decided_at=row.decided_at,
+                created_at=row.created_at,
             )
 
     # --- Memory Claim Operations ---

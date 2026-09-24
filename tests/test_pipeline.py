@@ -5,6 +5,9 @@ import os
 import subprocess
 import sys
 import threading
+import platform
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -14,19 +17,37 @@ from gh0st.relay import create_app
 from gh0st.router import System1Router
 from gh0st.router import EndpointClassifier
 from gh0st.worker import EphemeralWorker
+from gh0st.sandbox import CommandResult
+from gh0st.workspace import WorkspaceManager
 
 
 class StubGateway:
     def __init__(self, result):
-        self.result = result
+        self.results = list(result) if isinstance(result, list) else [result]
         self.calls = []
 
-    def complete_turn(self, prompt, system_instruction, attached_tool, max_tokens):
-        self.calls.append((prompt, attached_tool, max_tokens))
-        return self.result
+    def complete_turn(self, messages, attached_tool, max_tokens, model):
+        self.calls.append((messages, attached_tool, max_tokens, model))
+        return self.results.pop(0)
 
 
-def ledger(tmp_path: Path) -> StateLedger:
+class StubSandbox:
+    def __init__(self, *_):
+        self.calls = []
+
+    def run(self, command, purpose="other"):
+        self.calls.append((command, purpose))
+        output = "diff --git a/a.py b/a.py\n" if "git diff" in command else "reviewed"
+        return CommandResult(command, purpose, 0, output, "", 0.01)
+
+
+def ledger(tmp_path: Path, monkeypatch) -> StateLedger:
+    monkeypatch.setenv("GH0ST_WORKSPACE_ROOT", str(tmp_path / "workspaces"))
+    monkeypatch.setenv("GH0ST_MODEL_CATALOG", json.dumps([{
+        "name": "test-model", "gateway_model": "test-model",
+        "modalities": ["text", "code"], "context_window": 8192,
+        "max_payload_tokens": 4096, "quality": "frontier",
+    }]))
     db = StateLedger(f"sqlite:///{(tmp_path / 'state.db').as_posix()}")
     db.init_db()
     db.create_task("task_test", "Refactor code")
@@ -34,25 +55,31 @@ def ledger(tmp_path: Path) -> StateLedger:
     return db
 
 
-def test_route_worker_report_and_trusted_claims(tmp_path):
-    db = ledger(tmp_path)
+def test_route_worker_report_and_trusted_claims(tmp_path, monkeypatch):
+    db = ledger(tmp_path, monkeypatch)
     db.save_memory_claim(MemoryClaim(scope="task_test", claim_text="trusted", is_trusted=True))
     db.save_memory_claim(MemoryClaim(scope="task_test", claim_text="untrusted", is_trusted=False))
-    decision, ticket = System1Router(db).route("Refactor code", "task_test")
+    workspace, source_commit = WorkspaceManager().create("task_test")
+    decision, ticket = System1Router(db).route("Refactor code", "task_test",
+                                                workspace_path=workspace, source_commit=source_commit)
     assert decision.selected_capability == "code_refactor"
-    assert ticket.attached_tool_schema.name == "file_patch_proposal"
-    gateway = StubGateway({"content": "Review complete", "tool_calls": [], "total_tokens": 50, "cost_usd": 0.01})
-    report = EphemeralWorker(db, gateway).execute_turn(ticket.ticket_id)
+    assert ticket.attached_tool_schema.name == "local_workbench"
+    gateway = StubGateway([
+        {"content": "", "tool_calls": [{"id": "call_1", "function": {"name": "local_workbench", "arguments": json.dumps({"action": "run_command", "command": "cat a.py", "purpose": "inspect"})}}], "total_tokens": 50, "cost_usd": 0.01},
+        {"content": "Review complete", "tool_calls": [], "total_tokens": 25, "cost_usd": 0.01},
+    ])
+    report = EphemeralWorker(db, gateway, StubSandbox).execute_turn(ticket.ticket_id)
     assert report.status == "success"
     assert db.get_worker_report(ticket.ticket_id).output["content"] == "Review complete"
-    assert db.get_quota_record("task_test").tokens_consumed == 50
-    assert "trusted" in gateway.calls[0][0]
-    assert "untrusted" not in gateway.calls[0][0]
+    assert db.get_quota_record("task_test").tokens_consumed == 75
+    assert "trusted" in str(gateway.calls[0][0])
+    assert "untrusted" not in str(gateway.calls[0][0])
     assert gateway.calls[0][2] > 0
+    assert report.diff.startswith("diff --git")
 
 
-def test_quota_blocks_dispatch(tmp_path):
-    db = ledger(tmp_path)
+def test_quota_blocks_dispatch(tmp_path, monkeypatch):
+    db = ledger(tmp_path, monkeypatch)
     db.update_quota_consumption("task_test", 1000, 0)
     decision, ticket = System1Router(db).route("Refactor code", "task_test")
     assert ticket is None
@@ -60,7 +87,7 @@ def test_quota_blocks_dispatch(tmp_path):
 
 
 def test_external_router_requires_config(tmp_path, monkeypatch):
-    db = ledger(tmp_path)
+    db = ledger(tmp_path, monkeypatch)
     monkeypatch.setenv("GH0ST_ROUTER_MODEL", "jev")
     monkeypatch.delenv("GH0ST_ROUTER_ENDPOINT", raising=False)
     try:
@@ -77,9 +104,11 @@ def test_external_router_requires_config(tmp_path, monkeypatch):
         raise AssertionError("Insecure remote classifier endpoint was accepted")
 
 
-def test_planner_child_reenters_router(tmp_path):
-    db = ledger(tmp_path)
-    _, ticket = System1Router(db).route("something unfamiliar", "task_test")
+def test_planner_child_reenters_router(tmp_path, monkeypatch):
+    db = ledger(tmp_path, monkeypatch)
+    workspace, source_commit = WorkspaceManager().create("task_test")
+    _, ticket = System1Router(db).route("something unfamiliar", "task_test",
+                                        workspace_path=workspace, source_commit=source_commit)
     assert ticket.capability == "planner"
     gateway = StubGateway({"content": "", "tool_calls": [{"function": {"name": "emit_child_tickets", "arguments": '{"child_proposals":[{"capability":"unit_testing","objective":"Run pytest"}]}'}}], "total_tokens": 60, "cost_usd": 0.01})
     EphemeralWorker(db, gateway).execute_turn(ticket.ticket_id)
@@ -89,8 +118,8 @@ def test_planner_child_reenters_router(tmp_path):
     assert tickets[1].depth == 1
 
 
-def test_api_contract(tmp_path):
-    db = ledger(tmp_path)
+def test_api_contract(tmp_path, monkeypatch):
+    db = ledger(tmp_path, monkeypatch)
     client = TestClient(create_app(db))
     assert client.get("/v1/health").status_code == 200
     status = client.get("/v1/status", params={"task_id": "task_test"})
@@ -99,6 +128,7 @@ def test_api_contract(tmp_path):
     assert client.post("/v1/run", json={"prompt": ""}).status_code == 422
 
 
+@pytest.mark.skipif(platform.system() != "Linux", reason="Local execution requires Linux")
 def test_cli_spawns_worker_against_gateway(tmp_path):
     class GatewayHandler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -106,7 +136,12 @@ def test_cli_spawns_worker_against_gateway(tmp_path):
             payload = json.loads(self.rfile.read(length))
             assert self.path == "/v1/chat/completions"
             assert len(payload.get("tools", [])) == 1
-            body = json.dumps({"choices": [{"message": {"content": "Reviewed", "tool_calls": []}}],
+            if not getattr(self.server, "seen", False):
+                self.server.seen = True
+                message = {"content": "", "tool_calls": [{"id": "call_1", "function": {"name": "local_workbench", "arguments": json.dumps({"action": "run_command", "command": "printf reviewed", "purpose": "test"})}}]}
+            else:
+                message = {"content": "Reviewed", "tool_calls": []}
+            body = json.dumps({"choices": [{"message": message}],
                                "usage": {"total_tokens": 25, "cost_usd": 0.001}}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -123,8 +158,10 @@ def test_cli_spawns_worker_against_gateway(tmp_path):
     db_url = f"sqlite:///{(tmp_path / 'cli.db').as_posix()}"
     env = os.environ.copy()
     env["GH0ST_DEFAULT_MODEL"] = "test-model"
+    env["GH0ST_DEFAULT_MODEL_QUALITY"] = "frontier"
     command = [sys.executable, "-m", "gh0st.cli", "--db-url", db_url,
-               "run", "Refactor code", "--gateway-url", f"http://127.0.0.1:{server.server_port}/v1"]
+               "--workspace-root", str(tmp_path / "workspaces"),
+               "run", "Run pytest", "--gateway-url", f"http://127.0.0.1:{server.server_port}/v1"]
     try:
         result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
     finally:
@@ -136,4 +173,4 @@ def test_cli_spawns_worker_against_gateway(tmp_path):
     with db.get_session() as session:
         task = session.query(TaskRow).one()
         assert task.status == "completed"
-        assert db.get_quota_record(task.task_id).tokens_consumed == 25
+        assert db.get_quota_record(task.task_id).tokens_consumed == 50

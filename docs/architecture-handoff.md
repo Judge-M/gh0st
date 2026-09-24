@@ -4,6 +4,8 @@
 **Architectural Blueprint:** Orchestrator-Free, Seam-Based Ephemeral Runtime ("No-Agent" Stack)
 **Status:** Approved Specification (v3 - Multi-Surface UI & Pluggable Router Edition)
 
+**Implementation note:** The local runtime now executes model-requested commands inside a task-scoped clone through Linux bubblewrap. The source checkout is outside the writable mount. The relay broker, mobile pairing, remote grants, and packaged desktop app remain future work. Routing latency and pre-flight admission targets still require benchmarks on the release Linux environment.
+
 ---
 
 ## 1. Executive Summary & Core Philosophy
@@ -14,7 +16,7 @@
 1. **Zero Orchestrator Model:** Eliminates persistent manager LLMs (e.g., Claude Code, Codex, or manager agents maintaining 50k+ token conversation histories). There is no "orchestrator" holding state in memory.
 2. **Sub-100ms System-1 Gateway Router:** Replaces open-ended LLM planning with a fast, single-pass classifier using an **Ontological Decision Tree (OAG)**. Default router is **Layla** (local, $0 spend), with a pluggable interface supporting **Jev** or future specialized classification models.
 3. **Purely Ephemeral Workers:** Execution workers are short-lived, task-scoped, serverless Python processes (`python3 worker.py`). A worker wakes up from a database/queue event, reads its ticket state, executes a bounded task, writes its result (`WorkerReport`) back to the database, and **immediately terminates (`sys.exit(0)`)**.
-4. **Direct Process Execution (No Heavy Sandbox):** Eliminates complex custom Rust IPC sandboxes, Unix Domain Socket protocols, and container IPC plumbing in favor of direct OS process execution with instant `sys.exit()` kernel memory reclamation.
+4. **Short-Lived Process Execution:** Eliminates persistent manager processes. Local workbench commands execute inside a Linux process and mount boundary with no network access, using a task-scoped clone as the only persistent writable mount.
 5. **Pluggable Gateway Shell Architecture:** Offloads model provider translations, tool calling schema syntax, streaming protocols, vendor API churn, and provider failover to established external gateways (e.g., LiteLLM, OpenRouter, FastMCP / MCP Proxy). `gh0st` operates as an intelligent **System-1 Routing & Governance Shell** around these pluggable gateways.
 6. **Multi-Surface Client Strategy with Relay Control:** Provides unified operator interfaces across CLI, IDE extensions, Desktop GUI, and Mobile App. Mobile/remote control operates via an **SSH/Tailscale-Free Cloud Relay Tunnel** (Outbound WebSocket / gRPC pairing) similar to Claude Code / Codex remote pairing, requiring zero open ports or VPN setups.
 
