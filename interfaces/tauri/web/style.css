@@ -1,0 +1,31 @@
+:root { color-scheme: dark; font: 15px system-ui, sans-serif; background: #0e1628; color: #ecf2ff; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+header { display: flex; align-items: center; justify-content: space-between; padding: 18px 28px; border-bottom: 1px solid #324762; }
+header h1 { margin: 0; font-size: 26px; letter-spacing: .03em; }
+header p { margin: 2px 0 0; color: #aebcd0; }
+#connection { background: #364256; border-radius: 1rem; padding: 7px 12px; font-size: 13px; }
+#connection.connected { background: #166e4f; }
+main { display: grid; grid-template-columns: minmax(270px, 1fr) minmax(360px, 1.5fr); gap: 16px; max-width: 1300px; margin: auto; padding: 20px; }
+section { min-width: 0; background: #1b2940; border: 1px solid #324762; border-radius: 10px; padding: 18px; }
+h2 { margin: 0 0 16px; font-size: 18px; }
+label { display: block; color: #c3d1e3; margin: 0 0 12px; }
+input, textarea { display: block; width: 100%; margin-top: 5px; padding: 9px 10px; border-radius: 6px; border: 1px solid #54708f; background: #0e1628; color: #fff; font: inherit; }
+textarea { resize: vertical; }
+button { cursor: pointer; border: 0; border-radius: 6px; background: #576ded; color: #fff; font: inherit; padding: 9px 12px; }
+button:hover { background: #6d82fa; }
+button:disabled { opacity: .5; cursor: default; }
+.budgets { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.section-title { display: flex; justify-content: space-between; align-items: start; gap: 12px; }
+.section-title button { padding: 6px 10px; }
+.task { display: block; text-align: left; width: 100%; background: #283954; margin: 0 0 8px; overflow-wrap: anywhere; }
+.task span { display: block; color: #bacce3; font-size: 12px; margin-top: 3px; }
+#message { min-height: 1.4em; white-space: pre-wrap; }
+#task-heading { overflow-wrap: anywhere; }
+dl { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 16px; }
+dt { color: #aebcd0; } dd { margin: 0; text-align: right; }
+.grant, .ticket { border-top: 1px solid #324762; padding: 12px 0; overflow-wrap: anywhere; }
+.grant pre, .ticket pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; color: #cbd9ec; }
+.grant button { margin-right: 8px; }
+.grant button.reject { background: #a43d53; }
+@media (max-width: 850px) { main { grid-template-columns: 1fr; } }

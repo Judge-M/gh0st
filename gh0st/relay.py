@@ -9,7 +9,7 @@ import threading
 import uuid
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from websockets.asyncio.client import connect
@@ -59,6 +59,12 @@ def create_app(db: Optional[StateLedger] = None,
         authorize(authorization)
         return {"status": "ok", "default_classifier": os.getenv("GH0ST_ROUTER_MODEL", "layla"),
                 "gateway_target": os.getenv("GH0ST_GATEWAY_URL", "http://127.0.0.1:4000/v1")}
+
+    @app.get("/v1/tasks")
+    def tasks(limit: int = Query(default=50, ge=1, le=100),
+              authorization: Optional[str] = Header(default=None)):
+        authorize(authorization)
+        return {"tasks": ledger.list_tasks(limit)}
 
     @app.post("/v1/run", status_code=202)
     def run(request: RunRequest, authorization: Optional[str] = Header(default=None)):

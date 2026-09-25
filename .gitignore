@@ -9,4 +9,5 @@ node_modules/
 dist/
 build/
 .test-build/
+interfaces/tauri/src-tauri/gen/
 *.egg-info/

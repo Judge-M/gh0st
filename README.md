@@ -55,7 +55,7 @@ gh0st status task_id_from_previous_command
 gh0st resume task_id_from_previous_command
 gh0st grant grant_id --approve --operator "Matthew Judge"
 gh0st api --host 127.0.0.1 --port 8383
-gh0st pair --relay-url wss://relay.example.com --device-id my-linux
+gh0st pair --relay-url wss://relay.example.com --device-id my-linux --qr-output /tmp/gh0st-pair.svg
 ```
 
 The `grant` command records an operator decision. It does not launch a remote push, production write, or other external action. Local `git commit` checkpoints within the task clone are permitted when the clone has a configured author identity.
@@ -73,9 +73,13 @@ gh0st-relay --device-id my-linux
 gh0st pair --relay-url "$GH0ST_RELAY_URL" --device-id my-linux
 ```
 
-The last command prints a one-time `gh0st://pair?...` URI. Paste it into the mobile pairing field while the daemon is connected. The URI contains the end-to-end secret; do not give it to the broker. A paired session supports encrypted status reads, bounded task dispatch, and grant approval or rejection. Remote dispatch uses only `GH0ST_RELAY_SOURCE_REPO` as its source repository; without it, remote requests create scratch tasks. `GH0ST_RELAY_MAX_BUDGET_USD` and `GH0ST_RELAY_MAX_TOKENS` cap remote requests (defaults: $5 and 100,000 tokens). Broker offers live in memory only, and a disconnected client needs a new pairing URI. Grant decisions are ledger records; they do not execute the external action.
+The command prints a one-time `gh0st://pair?...` URI. With `--qr-output`, it also writes an SVG QR code; scan it with the mobile app camera or paste the URI into the pairing field. The URI and QR file contain the end-to-end secret; do not give them to the broker. A paired session supports encrypted status reads, bounded task dispatch, and grant approval or rejection. Remote dispatch uses only `GH0ST_RELAY_SOURCE_REPO` as its source repository; without it, remote requests create scratch tasks. `GH0ST_RELAY_MAX_BUDGET_USD` and `GH0ST_RELAY_MAX_TOKENS` cap remote requests (defaults: $5 and 100,000 tokens). Broker offers live in memory only, and a disconnected client needs a new pairing URI. Grant decisions are ledger records; they do not execute the external action.
 
 The browser dashboard is at `http://127.0.0.1:8383/ui`. The API is intended for loopback use. Set `GH0ST_API_TOKEN` to require a bearer token; clients then send `Authorization: Bearer <token>`. The dashboard currently assumes the default port and does not provide a token entry field, so use the CLI or an authenticated API client when token protection or a custom port is enabled.
+
+The VS Code extension in `interfaces/vscode` shows recent tasks, their tickets, and pending grant requests in the Explorer. Its Run command clones the active local workspace into a task-scoped workspace. Configure task budgets through `gh0st.maxBudgetUsd` and `gh0st.maxBudgetTokens`. If the local API has a token, use **gh0st: Set Local API Token** to save it in VS Code SecretStorage. Grant context actions record a ledger decision after operator confirmation.
+
+The Tauri desktop app in `interfaces/tauri` uses a Rust bridge restricted to the local daemon on `127.0.0.1`. It lists tasks, shows quota and worker reports, dispatches repository tasks, and records grant decisions. The API token is entered for the current app session and is not saved. The Linux release build has produced Debian and AppImage bundles; rebuild on a Linux machine with the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and Rust installed using `cd interfaces/tauri && pnpm install && pnpm build`.
 
 ```bash
 curl -X POST http://127.0.0.1:8383/v1/run \
@@ -83,7 +87,7 @@ curl -X POST http://127.0.0.1:8383/v1/run \
   -d '{"prompt":"Fix the parser test","source_repo":"/path/to/repo","max_budget_usd":3.5,"max_budget_tokens":50000}'
 ```
 
-`GET /v1/status?task_id=...` returns status, quota, tickets, reports, and grant requests. `POST /v1/grants/{grant_id}/decision` records an approval or rejection. See [the OpenAPI contract](docs/openapi.yaml).
+`GET /v1/tasks` lists up to 100 recent tasks. `GET /v1/status?task_id=...` returns status, quota, tickets, reports, and grant requests. `POST /v1/grants/{grant_id}/decision` records an approval or rejection. See [the OpenAPI contract](docs/openapi.yaml).
 
 ## Budget behavior
 
@@ -98,6 +102,9 @@ python -m pip install -e . pytest
 python -m pytest -q
 python -m benchmarks.admission
 cd interfaces/mobile && pnpm install && pnpm typecheck && pnpm test:crypto
+cd interfaces/vscode && node test/extension.test.js
+cd interfaces/tauri && pnpm test
+cd interfaces/tauri && pnpm install && pnpm build
 ```
 
 The Linux tests require `bwrap` and exercise an edit–test–report loop, out-of-workspace write rejection, non-gateway network rejection, and protection of the source checkout. Other tests cover model selection, quota reservation, duplicate claims, ledger reporting, grants, and API behavior.

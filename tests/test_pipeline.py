@@ -128,6 +128,22 @@ def test_api_contract(tmp_path, monkeypatch):
     assert client.post("/v1/run", json={"prompt": ""}).status_code == 422
 
 
+def test_task_list_is_bounded_and_authenticated(tmp_path, monkeypatch):
+    db = ledger(tmp_path, monkeypatch)
+    db.create_task("task_second", "Add status view")
+    monkeypatch.setenv("GH0ST_API_TOKEN", "local-secret")
+    client = TestClient(create_app(db))
+    assert client.get("/v1/tasks").status_code == 401
+    headers = {"Authorization": "Bearer local-secret"}
+    response = client.get("/v1/tasks", params={"limit": 1}, headers=headers)
+    assert response.status_code == 200
+    tasks = response.json()["tasks"]
+    assert len(tasks) == 1
+    assert tasks[0]["task_id"] == "task_second"
+    assert tasks[0]["description"] == "Add status view"
+    assert client.get("/v1/tasks", params={"limit": 101}, headers=headers).status_code == 422
+
+
 @pytest.mark.skipif(platform.system() != "Linux", reason="Local execution requires Linux")
 def test_cli_spawns_worker_against_gateway(tmp_path):
     class GatewayHandler(BaseHTTPRequestHandler):

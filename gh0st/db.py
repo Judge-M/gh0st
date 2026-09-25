@@ -240,6 +240,18 @@ class StateLedger:
         with self.get_session() as session:
             return session.get(TaskRow, task_id)
 
+    def list_tasks(self, limit: int = 50) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 100:
+            raise ValueError("Task list limit must be between 1 and 100")
+        with self.get_session() as session:
+            rows = (session.query(TaskRow)
+                    .order_by(TaskRow.created_at.desc(), TaskRow.task_id.desc())
+                    .limit(limit).all())
+            return [{"task_id": row.task_id, "description": row.description,
+                     "status": row.status, "created_at": row.created_at.isoformat(),
+                     "updated_at": row.updated_at.isoformat()}
+                    for row in rows]
+
     def set_task_status(self, task_id: str, status: str) -> None:
         with self.get_session() as session:
             row = session.get(TaskRow, task_id)

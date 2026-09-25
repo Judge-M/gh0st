@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as Crypto from 'expo-crypto';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Envelope, PairCipher, parsePairingUri } from './relayCrypto';
 import {
   StyleSheet,
@@ -20,6 +21,7 @@ export default function Gh0stMobileApp() {
   const [isConnected, setIsConnected] = useState(false);
   const [isPaired, setIsPaired] = useState(false);
   const [pairingStatus, setPairingStatus] = useState('Disconnected');
+  const [scanning, setScanning] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [events, setEvents] = useState<any[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<any[]>([]);
@@ -27,14 +29,16 @@ export default function Gh0stMobileApp() {
 
   const ws = useRef<WebSocket | null>(null);
   const cipher = useRef<PairCipher | null>(null);
+  const scanned = useRef(false);
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
 
   useEffect(() => {
     return () => { ws.current?.close(); };
   }, []);
 
-  const connectToRelay = () => {
+  const connectWithUri = (uri: string) => {
     try {
-      const pairing = parsePairingUri(pairingUri);
+      const pairing = parsePairingUri(uri);
       const channel = new PairCipher(pairing, 'client');
       ws.current?.close();
       cipher.current = channel;
@@ -106,6 +110,22 @@ export default function Gh0stMobileApp() {
     }
   };
 
+  const connectToRelay = () => connectWithUri(pairingUri);
+
+  const handleQrScan = ({ data }: { data: string }) => {
+    if (scanned.current) return;
+    try {
+      parsePairingUri(data);
+      scanned.current = true;
+      setPairingUri(data);
+      setScanning(false);
+      connectWithUri(data);
+    } catch {
+      setPairingStatus('That QR code is not a gh0st pairing code');
+      setScanning(false);
+    }
+  };
+
   const sendRemoteAction = async (action: string, payload: Record<string, unknown> = {}) => {
     const socket = ws.current;
     const channel = cipher.current;
@@ -153,6 +173,32 @@ export default function Gh0stMobileApp() {
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Pair this device</Text>
+          {!scanning ? (
+            <TouchableOpacity style={styles.secondaryBtn} onPress={() => {
+              scanned.current = false;
+              setScanning(true);
+            }}>
+              <Text style={styles.primaryBtnText}>Scan pairing QR code</Text>
+            </TouchableOpacity>
+          ) : !cameraPermission ? (
+            <Text style={styles.emptyText}>Checking camera permission…</Text>
+          ) : !cameraPermission.granted ? (
+            <TouchableOpacity style={styles.primaryBtn} onPress={() => void requestCameraPermission()}>
+              <Text style={styles.primaryBtnText}>Allow camera access to scan</Text>
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.cameraFrame}>
+              <CameraView
+                style={styles.camera}
+                facing="back"
+                barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+                onBarcodeScanned={handleQrScan}
+              />
+              <TouchableOpacity style={styles.cancelScanBtn} onPress={() => setScanning(false)}>
+                <Text style={styles.primaryBtnText}>Cancel scan</Text>
+              </TouchableOpacity>
+            </View>
+          )}
           <TextInput
             style={styles.input}
             placeholder="Paste the one-time gh0st://pair URI"
@@ -386,6 +432,31 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontWeight: 'bold',
     fontSize: 14,
+  },
+  secondaryBtn: {
+    backgroundColor: '#334155',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  cameraFrame: {
+    height: 260,
+    overflow: 'hidden',
+    borderRadius: 8,
+    marginBottom: 12,
+  },
+  camera: {
+    flex: 1,
+  },
+  cancelScanBtn: {
+    position: 'absolute',
+    bottom: 10,
+    alignSelf: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#334155',
   },
   approvalBox: {
     backgroundColor: '#0f172a',

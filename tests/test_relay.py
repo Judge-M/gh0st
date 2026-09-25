@@ -12,6 +12,7 @@ from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
 from gh0st.broker import MAX_MESSAGE_BYTES, RelayBroker
+from gh0st.cli import write_pair_qr
 from gh0st.db import StateLedger
 from gh0st.models import GrantRequest, QuotaRecord, Ticket
 from gh0st.relay import CloudRelayClient
@@ -49,6 +50,15 @@ def test_python_matches_mobile_encryption_vector():
     assert PairCipher(secret, pair_id, "device").decrypt(vector["envelope"]) == vector["payload"]
     with patch("gh0st.relay_crypto.os.urandom", return_value=bytes(range(12))):
         assert PairCipher(secret, pair_id, "client").encrypt(vector["payload"]) == vector["envelope"]
+
+
+def test_pair_qr_is_svg_and_never_overwrites(tmp_path):
+    path = tmp_path / "nested" / "pair.svg"
+    write_pair_qr("gh0st://pair?relay=wss%3A%2F%2Frelay.example&secret=abc", path)
+    content = path.read_text(encoding="utf-8")
+    assert "<svg" in content and "<path" in content
+    with pytest.raises(FileExistsError):
+        write_pair_qr("different", path)
 
 
 def test_broker_routes_only_paired_ciphertext():

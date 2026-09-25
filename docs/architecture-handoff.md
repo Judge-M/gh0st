@@ -4,7 +4,7 @@
 **Architectural Blueprint:** Orchestrator-Free, Seam-Based Ephemeral Runtime ("No-Agent" Stack)
 **Status:** Approved Specification (v3 - Multi-Surface UI & Pluggable Router Edition)
 
-**Implementation note:** The local runtime executes model-requested commands inside a task-scoped clone through Linux bubblewrap. A self-hosted broker and one-time encrypted pairing now support mobile status, bounded task requests, and recording grant decisions. Hosted deployment, offline push delivery, persistent pairing, and a packaged desktop app remain future work. Routing and admission targets still require benchmarks on the release Linux environment.
+**Implementation note:** The local runtime executes model-requested commands inside a task-scoped clone through Linux bubblewrap. A self-hosted broker and one-time encrypted pairing support mobile status, bounded task requests, and recording grant decisions. The VS Code task view and Tauri desktop source connect to the local API; Ubuntu produced Debian and AppImage bundles. Hosted relay deployment, offline push delivery, persistent pairing, and physical mobile validation remain release gates. Routing and admission targets still require benchmarks on the release Linux environment.
 
 ---
 

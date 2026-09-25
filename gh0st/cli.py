@@ -6,6 +6,7 @@ import subprocess
 import sys
 import uuid
 from typing import Optional
+from pathlib import Path
 
 from .db import StateLedger
 from .models import QuotaRecord, TicketStatus
@@ -141,6 +142,24 @@ class Gh0stCLI:
         return status
 
 
+def write_pair_qr(uri: str, output_path: Path) -> None:
+    """Write a one-time pairing URI as an SVG file without overwriting it."""
+    import qrcode
+    from qrcode.image.svg import SvgPathImage
+
+    qr = qrcode.QRCode(border=4, box_size=8)
+    qr.add_data(uri)
+    qr.make(fit=True)
+    svg = qr.make_image(image_factory=SvgPathImage).to_string(encoding="unicode")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("x", encoding="utf-8") as output:
+        output.write(svg)
+    try:
+        os.chmod(output_path, 0o600)
+    except OSError:
+        pass
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="gh0st")
     parser.add_argument("--db-url", default=None)
@@ -163,6 +182,8 @@ def main() -> None:
     pair = commands.add_parser("pair", help="Create a one-time encrypted relay pairing URI")
     pair.add_argument("--relay-url", default=os.getenv("GH0ST_RELAY_URL", ""))
     pair.add_argument("--device-id", default=os.getenv("GH0ST_DEVICE_ID", "local"))
+    pair.add_argument("--qr-output", type=Path,
+                      help="Write a scan-ready SVG containing the one-time pairing secret")
     grant = commands.add_parser("grant")
     grant.add_argument("grant_id")
     decision = grant.add_mutually_exclusive_group(required=True)
@@ -186,6 +207,9 @@ def main() -> None:
         if args.command == "pair":
             pair_id, secret, uri = new_pairing(args.relay_url, args.device_id)
             cli.db.create_relay_pair(pair_id, args.device_id, secret, args.relay_url)
+            if args.qr_output:
+                write_pair_qr(uri, args.qr_output)
+                print(f"One-time QR code written to {args.qr_output}; treat that file as a pairing secret.")
             print(uri)
         if args.command == "grant":
             recorded = cli.db.decide_grant_request(args.grant_id, args.approve, args.operator)
