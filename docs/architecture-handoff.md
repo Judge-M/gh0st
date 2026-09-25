@@ -4,7 +4,7 @@
 **Architectural Blueprint:** Orchestrator-Free, Seam-Based Ephemeral Runtime ("No-Agent" Stack)
 **Status:** Approved Specification (v3 - Multi-Surface UI & Pluggable Router Edition)
 
-**Implementation note:** The local runtime executes model-requested commands inside a task-scoped clone through Linux bubblewrap. A self-hosted broker and one-time encrypted pairing support mobile status, bounded task requests, and recording grant decisions. The VS Code task view and Tauri desktop source connect to the local API; Ubuntu produced Debian and AppImage bundles. Hosted relay deployment, offline push delivery, persistent pairing, and physical mobile validation remain release gates. Routing and admission targets still require benchmarks on the release Linux environment.
+**Implementation note:** The local runtime executes model-requested commands inside a task-scoped clone through Linux bubblewrap. A self-hosted broker and one-time encrypted pairing support mobile status, bounded task requests, and recording grant decisions. The VS Code extension and Tauri desktop app connect to the local API; Ubuntu produced Debian and AppImage bundles. Linux validation on the current WSL environment measured quota preflight at 0.204 ms p95 and the Layla classifier at 0.0168 ms p95. Hosted relay deployment, offline push delivery, persistent pairing, physical mobile validation, and signed package publishing remain release gates.
 
 ---
 
@@ -295,8 +295,9 @@ When a Planner worker decomposes a project or an execution worker discovers requ
   * Implemented 3-hop OAG decision tree, `LaylaClassifier` default, 1-schema tool pruner, and budget checks.
 * [x] **Milestone 3: Ephemeral Worker Runtime & Pluggable Gateway Adapter (`gh0st-milestone3-worker.py`)**
   * Implemented `EphemeralWorker` execution loop, `PluggableGatewayAdapter`, and child ticket re-entry handlers.
-* [ ] **Milestone 4: Multi-Surface CLI & Cloud Relay Tunnel (`gh0st/cli.py` & `gh0st/relay.py`)**
-  * Build `gh0st` CLI (`gh0st run "prompt"`, `gh0st status`).
-  * Build outbound WebSocket Cloud Relay tunnel daemon for Tailscale/SSH-free remote control.
-* [ ] **Milestone 5: IDE Extension & Desktop / Mobile App Integration**
-  * Build VS Code workspace extension and Tauri Desktop GUI / Mobile remote client pairing.
+* [x] **Milestone 4: Multi-Surface CLI & Self-Hosted Relay Tunnel (`gh0st/cli.py`, `gh0st/relay.py`, `gh0st/broker.py`)**
+  * Implemented the `gh0st` CLI (`run`, `status`, `resume`, `grant`, `api`, and `pair`).
+  * Implemented an outbound WebSocket relay, authenticated self-hosted broker, encrypted pairing, bounded remote task control, and QR pairing.
+* [x] **Milestone 5: IDE Extension & Desktop / Mobile App Integration**
+  * Implemented the VS Code extension, Tauri desktop app and Linux bundle build, and mobile QR pairing/control client.
+  * Remaining release gates: hosted broker deployment, OS push delivery, persistent multi-device pairing, physical mobile validation, and signed package publishing.

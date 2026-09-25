@@ -16,7 +16,7 @@ An ephemeral, task-scoped runtime with local routing, a SQLite state ledger, and
 - Running tickets hold a five-minute claim lease renewed by the worker. A dead child is halted immediately; after an unobserved controller crash, `gh0st resume TASK_ID` recovers an expired claim. Recovery records a halted report and never replays the worker automatically.
 - External pushes, production writes, and non-gateway network actions are grant requests in the ledger. An operator can approve or reject a request locally; this release does not execute external actions after approval.
 - A self-hosted WebSocket broker routes opaque encrypted frames. One-time pairing URIs carry a 256-bit secret that stays on the daemon and mobile client. Paired clients can read task status, submit bounded task requests, and record grant decisions; the broker does not see those payloads. Pairings expire after five minutes and are not reused after a disconnect.
-- The CLI, loopback API, basic browser dashboard, VS Code command extension, and mobile client provide control surfaces. OS push delivery, a hosted broker deployment, persistent multi-device pairing, and a packaged Tauri app are not yet included.
+- The CLI, loopback API, browser dashboard, VS Code extension, Tauri desktop app, and mobile pairing client provide control surfaces. Remaining release work includes OS push delivery, a hosted broker deployment, persistent multi-device pairing, physical mobile validation, and publishing signed desktop/mobile packages.
 
 ## Requirements
 
@@ -101,6 +101,7 @@ If a worker exits without a report, its gateway usage cannot be verified. Recove
 python -m pip install -e . pytest
 python -m pytest -q
 python -m benchmarks.admission
+python -m benchmarks.routing
 cd interfaces/mobile && pnpm install && pnpm typecheck && pnpm test:crypto
 cd interfaces/vscode && node test/extension.test.js
 cd interfaces/tauri && pnpm test
@@ -108,7 +109,7 @@ cd interfaces/tauri && pnpm install && pnpm build
 ```
 
 The Linux tests require `bwrap` and exercise an edit–test–report loop, out-of-workspace write rejection, non-gateway network rejection, and protection of the source checkout. Other tests cover model selection, quota reservation, duplicate claims, ledger reporting, grants, and API behavior.
-The admission benchmark measures the warm SQLite quota read and budget comparison on Linux. It exits nonzero if p95 latency across 1,000 samples is at least 1 ms. Use `--directory` to place its temporary database on the release filesystem. The durable ticket reservation transaction is separate from that preflight measurement.
+The admission benchmark measures the warm SQLite quota read and budget comparison on Linux. It exits nonzero if p95 latency across 1,000 samples is at least 1 ms. Use `--directory` to place its temporary database on the release filesystem. The durable ticket reservation transaction is separate from that preflight measurement. The routing benchmark measures the local Layla classifier interface and exits nonzero if p95 latency is at least 100 ms; it does not include model catalog selection or ledger writes.
 The relay tests start a broker on loopback and verify authenticated pairing, encrypted task/status/grant messages, secret removal after pairing, and a shared Python/mobile encryption vector. A physical iOS/Android device and production TLS deployment remain separate validation gates.
 
 ## License
