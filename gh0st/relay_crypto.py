@@ -5,6 +5,8 @@ import json
 import os
 import re
 import secrets
+import stat
+from pathlib import Path
 from urllib.parse import urlencode
 from typing import Any
 
@@ -37,6 +39,64 @@ def new_pairing(relay_url: str, device_id: str) -> tuple[str, str, str]:
     uri = "gh0st://pair?" + urlencode({"relay": relay_url, "device": device_id,
                                       "pair": pair_id, "secret": secret})
     return pair_id, secret, uri
+
+
+def _host_key_path() -> Path:
+    configured = os.getenv("GH0ST_RELAY_KEY_FILE")
+    return Path(configured).expanduser() if configured else Path.home() / ".gh0st" / "relay.key"
+
+
+def _host_key() -> bytes:
+    """Load or atomically create the local key used to encrypt pairing keys at rest."""
+    path = _host_key_path()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        try:
+            with os.fdopen(fd, "wb") as key_file:
+                key_file.write(os.urandom(32))
+                key_file.flush()
+                os.fsync(key_file.fileno())
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+    if os.name == "posix":
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode & 0o077:
+            raise PermissionError("Relay key file permissions must be 0600")
+    key = path.read_bytes()
+    if len(key) != 32:
+        raise ValueError("Relay key file must contain exactly 32 bytes")
+    return key
+
+
+def encrypt_persistent_secret(pair_id: str, secret: str) -> str:
+    key_material = _decode(secret)
+    if len(key_material) != 32 or not PAIR_ID_FORMAT.fullmatch(pair_id):
+        raise ValueError("Invalid persistent pairing key")
+    nonce = os.urandom(12)
+    encrypted = AESGCM(_host_key()).encrypt(
+        nonce, key_material, f"gh0st-pair-at-rest-v1:{pair_id}".encode("ascii"))
+    return "enc:v1:" + _encode(nonce + encrypted)
+
+
+def decrypt_persistent_secret(pair_id: str, encrypted_secret: str) -> str:
+    if not encrypted_secret.startswith("enc:v1:"):
+        # Backward compatibility for a pending offer written by earlier releases.
+        if len(_decode(encrypted_secret)) != 32:
+            raise ValueError("Invalid legacy pairing key")
+        return encrypted_secret
+    blob = _decode(encrypted_secret.removeprefix("enc:v1:"))
+    if len(blob) < 12 + 16 or not PAIR_ID_FORMAT.fullmatch(pair_id):
+        raise ValueError("Invalid encrypted persistent pairing key")
+    key_material = AESGCM(_host_key()).decrypt(
+        blob[:12], blob[12:], f"gh0st-pair-at-rest-v1:{pair_id}".encode("ascii"))
+    if len(key_material) != 32:
+        raise ValueError("Invalid decrypted persistent pairing key")
+    return _encode(key_material)
 
 
 class PairCipher:

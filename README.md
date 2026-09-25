@@ -15,8 +15,8 @@ An ephemeral, task-scoped runtime with local routing, a SQLite state ledger, and
 - The worker can iterate through edits and tests, then records commands, test results, a diff, unresolved failures, usage, and a final status. A gateway `402` or `429` halts the ticket.
 - Running tickets hold a five-minute claim lease renewed by the worker. A dead child is halted immediately; after an unobserved controller crash, `gh0st resume TASK_ID` recovers an expired claim. Recovery records a halted report and never replays the worker automatically.
 - External pushes, production writes, and non-gateway network actions are grant requests in the ledger. An operator can approve or reject a request locally; this release does not execute external actions after approval.
-- A self-hosted WebSocket broker routes opaque encrypted frames. One-time pairing URIs carry a 256-bit secret that stays on the daemon and mobile client. Paired clients can read task status, submit bounded task requests, and record grant decisions; the broker does not see those payloads. Pairings expire after five minutes and are not reused after a disconnect.
-- The CLI, loopback API, basic browser dashboard, VS Code command extension, and mobile client provide control surfaces. OS push delivery, a hosted broker deployment, persistent multi-device pairing, and a packaged Tauri app are not yet included.
+- A self-hosted WebSocket broker routes opaque encrypted frames. One-time pairing URIs carry a 256-bit secret that stays on the daemon and mobile client. Paired clients can read task status, submit bounded task requests, and record grant decisions; the broker does not see those payloads. Pair offers expire after five minutes. Paired phones reconnect using a credential in OS secure storage; operators can list and revoke pairings locally.
+- The CLI, loopback API, browser dashboard, VS Code extension, Tauri desktop app, and mobile pairing client provide control surfaces. Remaining release work includes OS push delivery, a hosted broker deployment, physical mobile reconnect/revocation validation, and publishing signed desktop/mobile packages.
 
 ## Requirements
 
@@ -55,7 +55,7 @@ gh0st status task_id_from_previous_command
 gh0st resume task_id_from_previous_command
 gh0st grant grant_id --approve --operator "Matthew Judge"
 gh0st api --host 127.0.0.1 --port 8383
-gh0st pair --relay-url wss://relay.example.com --device-id my-linux
+gh0st pair --relay-url wss://relay.example.com --device-id my-linux --qr-output /tmp/gh0st-pair.svg
 ```
 
 The `grant` command records an operator decision. It does not launch a remote push, production write, or other external action. Local `git commit` checkpoints within the task clone are permitted when the clone has a configured author identity.
@@ -73,9 +73,13 @@ gh0st-relay --device-id my-linux
 gh0st pair --relay-url "$GH0ST_RELAY_URL" --device-id my-linux
 ```
 
-The last command prints a one-time `gh0st://pair?...` URI. Paste it into the mobile pairing field while the daemon is connected. The URI contains the end-to-end secret; do not give it to the broker. A paired session supports encrypted status reads, bounded task dispatch, and grant approval or rejection. Remote dispatch uses only `GH0ST_RELAY_SOURCE_REPO` as its source repository; without it, remote requests create scratch tasks. `GH0ST_RELAY_MAX_BUDGET_USD` and `GH0ST_RELAY_MAX_TOKENS` cap remote requests (defaults: $5 and 100,000 tokens). Broker offers live in memory only, and a disconnected client needs a new pairing URI. Grant decisions are ledger records; they do not execute the external action.
+The command prints a one-time `gh0st://pair?...` URI. With `--qr-output`, it also writes an SVG QR code; scan it with the mobile app camera or paste the URI into the pairing field. The URI and QR file contain the end-to-end secret; do not give them to the broker. After the first encrypted handshake, the phone stores its pairing in iOS Keychain or Android Keystore-backed storage and reconnects automatically. The daemon stores the pairing key encrypted with `~/.gh0st/relay.key` (override with `GH0ST_RELAY_KEY_FILE`); protect and back up that key with the state database. Losing the key requires pairing phones again. Run `gh0st pairings` to list paired phones and `gh0st unpair PAIR_ID` to revoke one. The broker keeps live routing state in memory; the daemon republishes active pair IDs when it reconnects. Remote dispatch uses only `GH0ST_RELAY_SOURCE_REPO` as its source repository; without it, remote requests create scratch tasks. `GH0ST_RELAY_MAX_BUDGET_USD` and `GH0ST_RELAY_MAX_TOKENS` cap remote requests (defaults: $5 and 100,000 tokens). Grant decisions are ledger records; they do not execute the external action.
 
-The browser dashboard is at `http://127.0.0.1:8383/ui`. The API is intended for loopback use. Set `GH0ST_API_TOKEN` to require a bearer token; clients then send `Authorization: Bearer <token>`. The dashboard currently assumes the default port and does not provide a token entry field, so use the CLI or an authenticated API client when token protection or a custom port is enabled.
+The browser dashboard is at `http://127.0.0.1:8383/ui`. It uses the address and port from which it was opened. The API is intended for loopback use. Set `GH0ST_API_TOKEN` to require a bearer token; the dashboard accepts it in the token field and holds it in memory for the current tab only.
+
+The VS Code extension in `interfaces/vscode` shows recent tasks, their tickets, and pending grant requests in the Explorer. Its Run command clones the active local workspace into a task-scoped workspace. Configure task budgets through `gh0st.maxBudgetUsd` and `gh0st.maxBudgetTokens`. If the local API has a token, use **gh0st: Set Local API Token** to save it in VS Code SecretStorage. Grant context actions record a ledger decision after operator confirmation.
+
+The Tauri desktop app in `interfaces/tauri` uses a Rust bridge restricted to the local daemon on `127.0.0.1`. It lists tasks, shows quota and worker reports, dispatches repository tasks, and records grant decisions. The API token is entered for the current app session and is not saved. The Linux release build has produced Debian and AppImage bundles; rebuild on a Linux machine with the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and Rust installed using `cd interfaces/tauri && pnpm install && pnpm build`.
 
 ```bash
 curl -X POST http://127.0.0.1:8383/v1/run \
@@ -83,7 +87,7 @@ curl -X POST http://127.0.0.1:8383/v1/run \
   -d '{"prompt":"Fix the parser test","source_repo":"/path/to/repo","max_budget_usd":3.5,"max_budget_tokens":50000}'
 ```
 
-`GET /v1/status?task_id=...` returns status, quota, tickets, reports, and grant requests. `POST /v1/grants/{grant_id}/decision` records an approval or rejection. See [the OpenAPI contract](docs/openapi.yaml).
+`GET /v1/tasks` lists up to 100 recent tasks. `GET /v1/status?task_id=...` returns status, quota, tickets, reports, and grant requests. `POST /v1/grants/{grant_id}/decision` records an approval or rejection. See [the OpenAPI contract](docs/openapi.yaml).
 
 ## Budget behavior
 
@@ -97,11 +101,15 @@ If a worker exits without a report, its gateway usage cannot be verified. Recove
 python -m pip install -e . pytest
 python -m pytest -q
 python -m benchmarks.admission
+python -m benchmarks.routing
 cd interfaces/mobile && pnpm install && pnpm typecheck && pnpm test:crypto
+cd interfaces/vscode && node test/extension.test.js
+cd interfaces/tauri && pnpm test
+cd interfaces/tauri && pnpm install && pnpm build
 ```
 
 The Linux tests require `bwrap` and exercise an edit–test–report loop, out-of-workspace write rejection, non-gateway network rejection, and protection of the source checkout. Other tests cover model selection, quota reservation, duplicate claims, ledger reporting, grants, and API behavior.
-The admission benchmark measures the warm SQLite quota read and budget comparison on Linux. It exits nonzero if p95 latency across 1,000 samples is at least 1 ms. Use `--directory` to place its temporary database on the release filesystem. The durable ticket reservation transaction is separate from that preflight measurement.
+The admission benchmark measures the warm SQLite quota read and budget comparison on Linux. It exits nonzero if p95 latency across 1,000 samples is at least 1 ms. Use `--directory` to place its temporary database on the release filesystem. The durable ticket reservation transaction is separate from that preflight measurement. The routing benchmark measures the local Layla classifier interface and exits nonzero if p95 latency is at least 100 ms; it does not include model catalog selection or ledger writes.
 The relay tests start a broker on loopback and verify authenticated pairing, encrypted task/status/grant messages, secret removal after pairing, and a shared Python/mobile encryption vector. A physical iOS/Android device and production TLS deployment remain separate validation gates.
 
 ## License

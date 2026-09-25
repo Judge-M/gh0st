@@ -5,6 +5,16 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "dark",
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow gh0st to scan one-time pairing QR codes.",
+          "recordAudioAndroid": false
+        }
+      ],
+      "expo-secure-store"
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "org.cyberexperts.gh0st"

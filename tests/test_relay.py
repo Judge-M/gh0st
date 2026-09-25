@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +13,7 @@ from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
 from gh0st.broker import MAX_MESSAGE_BYTES, RelayBroker
+from gh0st.cli import write_pair_qr
 from gh0st.db import StateLedger
 from gh0st.models import GrantRequest, QuotaRecord, Ticket
 from gh0st.relay import CloudRelayClient
@@ -49,6 +51,100 @@ def test_python_matches_mobile_encryption_vector():
     assert PairCipher(secret, pair_id, "device").decrypt(vector["envelope"]) == vector["payload"]
     with patch("gh0st.relay_crypto.os.urandom", return_value=bytes(range(12))):
         assert PairCipher(secret, pair_id, "client").encrypt(vector["payload"]) == vector["envelope"]
+
+
+def test_pair_qr_is_svg_and_never_overwrites(tmp_path):
+    path = tmp_path / "nested" / "pair.svg"
+    write_pair_qr("gh0st://pair?relay=wss%3A%2F%2Frelay.example&secret=abc", path)
+    content = path.read_text(encoding="utf-8")
+    assert "<svg" in content and "<path" in content
+    with pytest.raises(FileExistsError):
+        write_pair_qr("different", path)
+
+
+def test_pairing_secret_is_encrypted_persisted_and_revocable(tmp_path, monkeypatch):
+    monkeypatch.setenv("GH0ST_RELAY_KEY_FILE", str(tmp_path / "relay.key"))
+    db = StateLedger(f"sqlite:///{(tmp_path / 'pairings.db').as_posix()}")
+    db.init_db()
+    pair_id, secret, _ = new_pairing("ws://127.0.0.1:8765", "dev_test")
+    db.create_relay_pair(pair_id, "dev_test", secret, "ws://127.0.0.1:8765")
+    from gh0st.db import RelayPairRow
+    with db.get_session() as session:
+        pending_secret = session.get(RelayPairRow, pair_id).secret
+    assert pending_secret.startswith("enc:v1:") and secret not in pending_secret
+    assert db.get_relay_pair(pair_id)["secret"] == secret
+
+    assert db.consume_relay_pair(pair_id, "dev_test") == secret
+    assert db.get_relay_pair(pair_id)["secret"] == ""
+    assert db.get_paired_device(pair_id, "dev_test")["secret"] == secret
+    with db.get_session() as session:
+        from gh0st.db import PairedDeviceRow
+        stored = session.get(PairedDeviceRow, pair_id).secret_encrypted
+    assert secret not in stored
+    if os.name == "posix":
+        assert (tmp_path / "relay.key").stat().st_mode & 0o777 == 0o600
+
+    assert db.revoke_paired_device(pair_id, "dev_test")
+    assert db.get_paired_device(pair_id, "dev_test") is None
+    assert db.list_paired_devices("dev_test") == []
+    assert pair_id in db.list_revoked_pair_ids("dev_test")
+
+
+def test_pairing_cli_lists_and_revokes_device(tmp_path, monkeypatch, capsys):
+    import sys
+    from gh0st.cli import main
+
+    monkeypatch.setenv("GH0ST_RELAY_KEY_FILE", str(tmp_path / "relay.key"))
+    db_url = f"sqlite:///{(tmp_path / 'cli-pairings.db').as_posix()}"
+    db = StateLedger(db_url)
+    db.init_db()
+    pair_id, secret, _ = new_pairing("ws://127.0.0.1:8765", "dev_test")
+    db.create_relay_pair(pair_id, "dev_test", secret, "ws://127.0.0.1:8765")
+    db.consume_relay_pair(pair_id, "dev_test")
+
+    monkeypatch.setattr(sys, "argv", ["gh0st", "--db-url", db_url,
+                                       "--workspace-root", str(tmp_path / "workspaces"),
+                                       "pairings", "--device-id", "dev_test"])
+    main()
+    assert pair_id in capsys.readouterr().out
+
+    monkeypatch.setattr(sys, "argv", ["gh0st", "--db-url", db_url,
+                                       "--workspace-root", str(tmp_path / "workspaces"),
+                                       "unpair", pair_id, "--device-id", "dev_test"])
+    main()
+    assert "Revoked pairing" in capsys.readouterr().out
+    assert db.list_paired_devices("dev_test") == []
+
+
+def test_broker_reconnects_registered_mobile_after_daemon_reconnect():
+    async def scenario():
+        broker = RelayBroker({"dev_test": "t" * 48})
+        async with serve(broker.handle, "127.0.0.1", 0,
+                         max_size=MAX_MESSAGE_BYTES, compression=None) as server:
+            url = f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+            pair_id, _, _ = new_pairing(url, "dev_test")
+            headers = {"Authorization": "Bearer " + "t" * 48}
+            async with connect(url, additional_headers=headers) as device:
+                await device.send(json.dumps({"message_type": "device_register", "device_id": "dev_test"}))
+                await device.recv()
+                await device.send(json.dumps({"message_type": "pair_offer", "pair_id": pair_id}))
+                await device.recv()
+                async with connect(url) as client:
+                    await client.send(json.dumps({"message_type": "client_register", "pair_id": pair_id}))
+                    assert json.loads(await client.recv())["message_type"] == "transport_connected"
+                    assert json.loads(await device.recv())["message_type"] == "client_connected"
+
+            async with connect(url, additional_headers=headers) as restarted_device:
+                await restarted_device.send(json.dumps({"message_type": "device_register", "device_id": "dev_test"}))
+                await restarted_device.recv()
+                await restarted_device.send(json.dumps({"message_type": "pair_register", "pair_id": pair_id}))
+                async with connect(url) as reconnected_client:
+                    await reconnected_client.send(json.dumps({"message_type": "client_register", "pair_id": pair_id}))
+                    assert json.loads(await reconnected_client.recv())["message_type"] == "transport_connected"
+                    assert json.loads(await restarted_device.recv())["message_type"] == "client_connected"
+            assert broker.paired_clients[pair_id] == "dev_test"
+
+    asyncio.run(scenario())
 
 
 def test_broker_routes_only_paired_ciphertext():
@@ -111,6 +207,7 @@ def test_broker_rejects_unauthorized_device_and_unknown_offer():
 
 def test_paired_daemon_handles_encrypted_status_grant_and_dispatch(tmp_path, monkeypatch):
     async def scenario():
+        monkeypatch.setenv("GH0ST_RELAY_KEY_FILE", str(tmp_path / "relay.key"))
         db = StateLedger(f"sqlite:///{(tmp_path / 'state.db').as_posix()}")
         db.init_db()
         db.create_task("task_one", "Fix code")
@@ -194,6 +291,17 @@ def test_paired_daemon_handles_encrypted_status_grant_and_dispatch(tmp_path, mon
                     rejected = cipher.decrypt(json.loads(await asyncio.wait_for(client.recv(), 5)))
                     assert rejected["ok"] is False
                     assert len(dispatched) == 1
+                async with connect(url) as reconnected_client:
+                    await reconnected_client.send(json.dumps({"message_type": "client_register", "pair_id": pair_id}))
+                    assert json.loads(await asyncio.wait_for(reconnected_client.recv(), 5))["message_type"] == "transport_connected"
+                    resumed_cipher = PairCipher(secret, pair_id, "client")
+                    resumed = resumed_cipher.decrypt(json.loads(await asyncio.wait_for(reconnected_client.recv(), 5)))
+                    assert resumed["message_type"] == "paired"
+                    assert db.get_paired_device(pair_id, "dev_test")["secret"] == secret
+                    assert db.revoke_paired_device(pair_id, "dev_test")
+                    with pytest.raises(ConnectionClosed):
+                        await asyncio.wait_for(reconnected_client.recv(), 5)
+                    assert pair_id not in broker.paired_clients
             finally:
                 daemon_task.cancel()
                 await asyncio.gather(daemon_task, return_exceptions=True)

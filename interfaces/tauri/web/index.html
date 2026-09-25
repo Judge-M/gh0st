@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>gh0st Control</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div><h1>gh0st</h1><p>Local task control</p></div>
+    <strong id="connection" role="status">Connecting</strong>
+  </header>
+  <main>
+    <section class="settings" aria-labelledby="settings-title">
+      <h2 id="settings-title">Local daemon</h2>
+      <label>API port <input id="port" type="number" min="1" max="65535" value="8383"></label>
+      <label>API token <input id="token" type="password" autocomplete="off" placeholder="Optional bearer token"></label>
+      <label>Operator name <input id="operator" type="text" placeholder="Name for grant decisions"></label>
+      <button id="refresh">Connect and refresh</button>
+    </section>
+    <section class="composer" aria-labelledby="composer-title">
+      <h2 id="composer-title">New task</h2>
+      <label>Repository path <input id="source-repo" type="text" placeholder="/path/to/repository"></label>
+      <label>Objective <textarea id="prompt" rows="5" placeholder="Describe the task"></textarea></label>
+      <div class="budgets">
+        <label>USD cap <input id="budget-usd" type="number" min="0.01" step="0.01" value="5"></label>
+        <label>Token cap <input id="budget-tokens" type="number" min="1" step="1" value="100000"></label>
+      </div>
+      <button id="dispatch">Start task</button>
+      <p id="message" role="status"></p>
+    </section>
+    <section class="task-list" aria-labelledby="tasks-title">
+      <div class="section-title"><h2 id="tasks-title">Recent tasks</h2><button id="refresh-tasks">Refresh</button></div>
+      <div id="tasks"></div>
+    </section>
+    <section class="detail" aria-labelledby="detail-title">
+      <h2 id="detail-title">Task detail</h2>
+      <p id="task-heading">Choose a task to inspect its status, quota, reports, and grants.</p>
+      <dl id="quota"></dl>
+      <div id="grants"></div>
+      <div id="tickets"></div>
+    </section>
+  </main>
+</body>
+</html>

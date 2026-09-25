@@ -5,19 +5,42 @@
   "publisher": "Judge-M",
   "engines": {"vscode": "^1.90.0"},
   "main": "./extension.js",
-  "activationEvents": ["onCommand:gh0st.run", "onCommand:gh0st.status"],
+  "scripts": {"test": "node test/extension.test.js"},
+  "activationEvents": ["onView:gh0st.tasks", "onCommand:gh0st.run", "onCommand:gh0st.status"],
   "contributes": {
     "configuration": {
       "title": "gh0st",
       "properties": {
         "gh0st.apiBase": {"type": "string", "default": "http://127.0.0.1:8383", "description": "Local gh0st API URL"},
-        "gh0st.apiToken": {"type": "string", "default": "", "description": "Bearer token when GH0ST_API_TOKEN is set"}
+        "gh0st.apiToken": {"type": "string", "default": "", "description": "Legacy bearer token setting; use the Set API Token command to store it securely"},
+        "gh0st.maxBudgetUsd": {"type": "number", "default": 5, "exclusiveMinimum": 0, "description": "Maximum USD budget for a new task"},
+        "gh0st.maxBudgetTokens": {"type": "integer", "default": 100000, "minimum": 1, "description": "Maximum token budget for a new task"},
+        "gh0st.operatorName": {"type": "string", "default": "", "description": "Operator name recorded for grant decisions"}
       }
     },
     "commands": [
       {"command": "gh0st.run", "title": "gh0st: Run Task"},
-      {"command": "gh0st.status", "title": "gh0st: Show Task Status"}
-    ]
+      {"command": "gh0st.status", "title": "gh0st: Show Task Status"},
+      {"command": "gh0st.refresh", "title": "gh0st: Refresh Tasks"},
+      {"command": "gh0st.setApiToken", "title": "gh0st: Set Local API Token"},
+      {"command": "gh0st.inspectGrant", "title": "gh0st: Inspect Grant"},
+      {"command": "gh0st.approveGrant", "title": "gh0st: Approve Grant"},
+      {"command": "gh0st.rejectGrant", "title": "gh0st: Reject Grant"}
+    ],
+    "views": {
+      "explorer": [
+        {"id": "gh0st.tasks", "name": "gh0st Tasks"}
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {"command": "gh0st.refresh", "when": "view == gh0st.tasks", "group": "navigation"}
+      ],
+      "view/item/context": [
+        {"command": "gh0st.approveGrant", "when": "view == gh0st.tasks && viewItem == gh0stGrant", "group": "inline"},
+        {"command": "gh0st.rejectGrant", "when": "view == gh0st.tasks && viewItem == gh0stGrant", "group": "inline"}
+      ]
+    }
   },
   "license": "Apache-2.0"
 }

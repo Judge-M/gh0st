@@ -19,6 +19,7 @@ dependencies = [
   "websockets>=13,<17",
   "tiktoken>=0.7,<1",
   "cryptography>=41,<51",
+  "qrcode>=8.2,<9",
 ]
 
 [project.scripts]

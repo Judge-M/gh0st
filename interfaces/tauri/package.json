@@ -1,0 +1,13 @@
+{
+  "name": "gh0st-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "node test/app.test.js",
+    "dev": "tauri dev",
+    "build": "tauri build --bundles deb,appimage"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

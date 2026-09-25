@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as Crypto from 'expo-crypto';
-import { Envelope, PairCipher, parsePairingUri } from './relayCrypto';
+import * as SecureStore from 'expo-secure-store';
+import { CameraView, useCameraPermissions } from 'expo-camera';
+import { Envelope, PairCipher, Pairing, parsePairingUri } from './relayCrypto';
 import {
   StyleSheet,
   Text,
@@ -11,8 +13,11 @@ import {
   SafeAreaView,
   StatusBar,
   Alert,
-  Platform
+  Platform,
+  AppState
 } from 'react-native';
+
+const STORED_PAIRING_KEY = 'gh0st.pairing.v1';
 
 export default function Gh0stMobileApp() {
   const [pairingUri, setPairingUri] = useState('');
@@ -20,6 +25,8 @@ export default function Gh0stMobileApp() {
   const [isConnected, setIsConnected] = useState(false);
   const [isPaired, setIsPaired] = useState(false);
   const [pairingStatus, setPairingStatus] = useState('Disconnected');
+  const [hasSavedPairing, setHasSavedPairing] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [events, setEvents] = useState<any[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<any[]>([]);
@@ -27,18 +34,19 @@ export default function Gh0stMobileApp() {
 
   const ws = useRef<WebSocket | null>(null);
   const cipher = useRef<PairCipher | null>(null);
+  const activePairing = useRef<Pairing | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttempts = useRef(0);
+  const scanned = useRef(false);
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
 
-  useEffect(() => {
-    return () => { ws.current?.close(); };
-  }, []);
-
-  const connectToRelay = () => {
+  const connectWithPairing = (pairing: Pairing) => {
     try {
-      const pairing = parsePairingUri(pairingUri);
+      activePairing.current = pairing;
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       const channel = new PairCipher(pairing, 'client');
       ws.current?.close();
       cipher.current = channel;
-      setPairingUri('');
       setIsPaired(false);
       setPairingStatus('Connecting...');
       const socket = new WebSocket(pairing.relay);
@@ -58,8 +66,14 @@ export default function Gh0stMobileApp() {
           if (data.message_type !== 'ciphertext') return;
           const decrypted = channel.decrypt(data as Envelope);
           if (decrypted.message_type === 'paired') {
+            reconnectAttempts.current = 0;
             setIsPaired(true);
             setPairingStatus(`Paired with ${pairing.device}`);
+            if (Platform.OS !== 'web') {
+              void SecureStore.setItemAsync(STORED_PAIRING_KEY, JSON.stringify(pairing))
+                .then(() => setHasSavedPairing(true))
+                .catch(() => setPairingStatus(`Paired with ${pairing.device}; secure reconnect storage failed`));
+            }
           } else {
             handleIncomingEvent(decrypted);
           }
@@ -74,12 +88,27 @@ export default function Gh0stMobileApp() {
         setIsConnected(false);
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         if (ws.current !== socket) return;
         setIsConnected(false);
         setIsPaired(false);
         cipher.current = null;
-        setPairingStatus('Disconnected; create a new pairing to reconnect');
+        if (event.code === 1008 && event.reason === 'Pairing revoked') {
+          activePairing.current = null;
+          if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+          setHasSavedPairing(false);
+          setPairingStatus('This pairing was revoked by the operator');
+          if (Platform.OS !== 'web') void SecureStore.deleteItemAsync(STORED_PAIRING_KEY);
+          return;
+        }
+        if (activePairing.current?.pair === pairing.pair) {
+          setPairingStatus('Disconnected; reconnecting securely…');
+          reconnectAttempts.current += 1;
+          const delay = Math.min(30000, 1000 * (2 ** Math.min(reconnectAttempts.current - 1, 5)));
+          reconnectTimer.current = setTimeout(() => connectWithPairing(pairing), delay);
+        } else {
+          setPairingStatus('Disconnected');
+        }
       };
 
       ws.current = socket;
@@ -103,6 +132,74 @@ export default function Gh0stMobileApp() {
         remainingUsd: snapshot.remaining_usd ?? prev.remainingUsd,
         remainingTokens: snapshot.remaining_tokens ?? prev.remainingTokens,
       }));
+    }
+  };
+
+  const connectWithUri = (uri: string) => {
+    try {
+      setPairingUri('');
+      connectWithPairing(parsePairingUri(uri));
+    } catch (err) {
+      setPairingStatus(err instanceof Error ? err.message : 'Invalid pairing URI');
+    }
+  };
+
+  const forgetPairing = async () => {
+    activePairing.current = null;
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    ws.current?.close();
+    ws.current = null;
+    cipher.current = null;
+    setIsConnected(false);
+    setIsPaired(false);
+    setHasSavedPairing(false);
+    setPairingStatus('Saved pairing removed from this phone');
+    if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(STORED_PAIRING_KEY);
+  };
+
+  useEffect(() => {
+    let active = true;
+    const appState = AppState.addEventListener('change', (state) => {
+      const pairing = activePairing.current;
+      if (state === 'active' && pairing &&
+          (!ws.current || ws.current.readyState === WebSocket.CLOSED)) {
+        connectWithPairing(pairing);
+      }
+    });
+    if (Platform.OS !== 'web') {
+      void SecureStore.getItemAsync(STORED_PAIRING_KEY).then((value) => {
+        if (!active || !value) return;
+        const saved = JSON.parse(value);
+        const pairing = parsePairingUri(`gh0st://pair?relay=${encodeURIComponent(saved.relay)}&device=${encodeURIComponent(saved.device)}&pair=${encodeURIComponent(saved.pair)}&secret=${encodeURIComponent(saved.secret)}`);
+        setHasSavedPairing(true);
+        setPairingStatus('Reconnecting to saved device…');
+        connectWithPairing(pairing);
+      }).catch(() => {
+        if (active) setPairingStatus('Saved pairing could not be read; scan a new code');
+      });
+    }
+    return () => {
+      active = false;
+      activePairing.current = null;
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      appState.remove();
+      ws.current?.close();
+    };
+  }, []);
+
+  const connectToRelay = () => connectWithUri(pairingUri);
+
+  const handleQrScan = ({ data }: { data: string }) => {
+    if (scanned.current) return;
+    try {
+      parsePairingUri(data);
+      scanned.current = true;
+      setPairingUri(data);
+      setScanning(false);
+      connectWithUri(data);
+    } catch {
+      setPairingStatus('That QR code is not a gh0st pairing code');
+      setScanning(false);
     }
   };
 
@@ -153,6 +250,32 @@ export default function Gh0stMobileApp() {
 
         <View style={styles.card}>
           <Text style={styles.cardTitle}>Pair this device</Text>
+          {!scanning ? (
+            <TouchableOpacity style={styles.secondaryBtn} onPress={() => {
+              scanned.current = false;
+              setScanning(true);
+            }}>
+              <Text style={styles.primaryBtnText}>Scan pairing QR code</Text>
+            </TouchableOpacity>
+          ) : !cameraPermission ? (
+            <Text style={styles.emptyText}>Checking camera permission…</Text>
+          ) : !cameraPermission.granted ? (
+            <TouchableOpacity style={styles.primaryBtn} onPress={() => void requestCameraPermission()}>
+              <Text style={styles.primaryBtnText}>Allow camera access to scan</Text>
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.cameraFrame}>
+              <CameraView
+                style={styles.camera}
+                facing="back"
+                barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
+                onBarcodeScanned={handleQrScan}
+              />
+              <TouchableOpacity style={styles.cancelScanBtn} onPress={() => setScanning(false)}>
+                <Text style={styles.primaryBtnText}>Cancel scan</Text>
+              </TouchableOpacity>
+            </View>
+          )}
           <TextInput
             style={styles.input}
             placeholder="Paste the one-time gh0st://pair URI"
@@ -166,6 +289,11 @@ export default function Gh0stMobileApp() {
           <TouchableOpacity style={styles.primaryBtn} onPress={connectToRelay}>
             <Text style={styles.primaryBtnText}>Connect securely</Text>
           </TouchableOpacity>
+          {hasSavedPairing && (
+            <TouchableOpacity style={styles.secondaryBtn} onPress={() => void forgetPairing()}>
+              <Text style={styles.primaryBtnText}>Forget saved pairing on this phone</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         <View style={styles.card}>
@@ -386,6 +514,31 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontWeight: 'bold',
     fontSize: 14,
+  },
+  secondaryBtn: {
+    backgroundColor: '#334155',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  cameraFrame: {
+    height: 260,
+    overflow: 'hidden',
+    borderRadius: 8,
+    marginBottom: 12,
+  },
+  camera: {
+    flex: 1,
+  },
+  cancelScanBtn: {
+    position: 'absolute',
+    bottom: 10,
+    alignSelf: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#334155',
   },
   approvalBox: {
     backgroundColor: '#0f172a',

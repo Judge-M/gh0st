@@ -9,7 +9,7 @@ import threading
 import uuid
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from websockets.asyncio.client import connect
@@ -59,6 +59,12 @@ def create_app(db: Optional[StateLedger] = None,
         authorize(authorization)
         return {"status": "ok", "default_classifier": os.getenv("GH0ST_ROUTER_MODEL", "layla"),
                 "gateway_target": os.getenv("GH0ST_GATEWAY_URL", "http://127.0.0.1:4000/v1")}
+
+    @app.get("/v1/tasks")
+    def tasks(limit: int = Query(default=50, ge=1, le=100),
+              authorization: Optional[str] = Header(default=None)):
+        authorize(authorization)
+        return {"tasks": ledger.list_tasks(limit)}
 
     @app.post("/v1/run", status_code=202)
     def run(request: RunRequest, authorization: Optional[str] = Header(default=None)):
@@ -148,7 +154,9 @@ class CloudRelayClient:
         self.cli = Gh0stCLI(self.db.db_url, workspace_root)
         self.background_tasks: set[asyncio.Task] = set()
 
-    async def _publish_offers(self, socket, sent: set[str]) -> None:
+    async def _publish_offers(self, socket, sent: set[str], registered: set[str],
+                              revoked_sent: set[str], ciphers: dict[str, PairCipher],
+                              seen_actions: dict[str, set[str]]) -> None:
         while True:
             self.db.expire_relay_pairs()
             for pair in self.db.list_live_relay_pairs(self.device_id):
@@ -156,6 +164,19 @@ class CloudRelayClient:
                     await socket.send(json.dumps({"message_type": "pair_offer",
                                                   "pair_id": pair["pair_id"]}))
                     sent.add(pair["pair_id"])
+            active = {pair["pair_id"] for pair in self.db.list_paired_devices(self.device_id)
+                      if pair["relay_url"] == self.relay_url}
+            for pair_id in active - registered:
+                await socket.send(json.dumps({"message_type": "pair_register",
+                                              "pair_id": pair_id}))
+                registered.add(pair_id)
+            for pair_id in set(self.db.list_revoked_pair_ids(self.device_id, self.relay_url)) - revoked_sent:
+                await socket.send(json.dumps({"message_type": "pair_revoke",
+                                              "pair_id": pair_id}))
+                ciphers.pop(pair_id, None)
+                seen_actions.pop(pair_id, None)
+                registered.discard(pair_id)
+                revoked_sent.add(pair_id)
             await asyncio.sleep(2)
 
     async def _send_encrypted(self, socket, cipher: PairCipher, payload: dict) -> None:
@@ -250,9 +271,13 @@ class CloudRelayClient:
                     if registered.get("message_type") != "device_registered":
                         raise ValueError("Broker did not authenticate the device")
                     sent_offers: set[str] = set()
+                    registered_pairs: set[str] = set()
+                    revoked_sent: set[str] = set()
                     ciphers: dict[str, PairCipher] = {}
                     seen_actions: dict[str, set[str]] = {}
-                    offer_task = asyncio.create_task(self._publish_offers(socket, sent_offers))
+                    offer_task = asyncio.create_task(self._publish_offers(
+                        socket, sent_offers, registered_pairs, revoked_sent,
+                        ciphers, seen_actions))
                     try:
                         async for message in socket:
                             payload = json.loads(message)
@@ -260,9 +285,13 @@ class CloudRelayClient:
                             kind = payload.get("message_type")
                             if kind == "offer_ready" and pair_id in sent_offers:
                                 self.db.set_relay_pair_status(pair_id, ("pending", "offered"), "offered")
-                            elif kind == "client_connected" and pair_id in sent_offers:
+                            elif kind == "client_connected" and (pair_id in sent_offers or pair_id in registered_pairs):
                                 secret = self.db.consume_relay_pair(pair_id, self.device_id)
+                                if secret is None:
+                                    paired_device = self.db.get_paired_device(pair_id, self.device_id)
+                                    secret = paired_device["secret"] if paired_device else None
                                 if secret:
+                                    self.db.touch_paired_device(pair_id, self.device_id)
                                     cipher = PairCipher(secret, pair_id, "device")
                                     ciphers[pair_id] = cipher
                                     seen_actions[pair_id] = set()

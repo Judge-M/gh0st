@@ -37,6 +37,7 @@ class RelayBroker:
         self.device_tokens = device_tokens
         self.devices: dict[str, ServerConnection] = {}
         self.offers: dict[str, tuple[str, float]] = {}
+        self.paired_clients: dict[str, str] = {}
         self.clients: dict[str, ServerConnection] = {}
         self.client_devices: dict[str, str] = {}
         self.device_clients: dict[str, set[str]] = defaultdict(set)
@@ -146,7 +147,7 @@ class RelayBroker:
         pair_id = data.get("pair_id")
         if kind == "pair_offer":
             self._discard_expired_offers()
-            if not isinstance(pair_id, str) or not PAIR_ID.fullmatch(pair_id) or pair_id in self.offers or pair_id in self.clients:
+            if not isinstance(pair_id, str) or not PAIR_ID.fullmatch(pair_id) or pair_id in self.offers or pair_id in self.clients or pair_id in self.paired_clients:
                 await self._send(socket, {"message_type": "error", "reason": "Invalid or duplicate pair ID"})
                 return
             if sum(offered_by == device_id for offered_by, _ in self.offers.values()) >= MAX_OFFERS_PER_DEVICE:
@@ -159,6 +160,19 @@ class RelayBroker:
             client = self.clients.get(pair_id) if isinstance(pair_id, str) else None
             if client and self.client_devices.get(pair_id) == device_id and self._valid_ciphertext(data, pair_id):
                 await self._send(client, data)
+        elif kind == "pair_register":
+            if isinstance(pair_id, str) and PAIR_ID.fullmatch(pair_id):
+                registered_device = self.paired_clients.get(pair_id)
+                if registered_device is None or registered_device == device_id:
+                    self.paired_clients[pair_id] = device_id
+                else:
+                    await self._send(socket, {"message_type": "error", "reason": "Pair ID is already registered"})
+        elif kind == "pair_revoke":
+            if isinstance(pair_id, str) and self.paired_clients.get(pair_id) == device_id:
+                self.paired_clients.pop(pair_id, None)
+                client = self.clients.get(pair_id)
+                if client:
+                    await client.close(code=1008, reason="Pairing revoked")
         elif kind == "ping":
             await self._send(socket, {"message_type": "pong"})
         else:
@@ -168,11 +182,14 @@ class RelayBroker:
         self._discard_expired_offers()
         pair_id = hello.get("pair_id")
         offer = self.offers.get(pair_id) if isinstance(pair_id, str) else None
-        if not offer or offer[0] not in self.devices or pair_id in self.clients:
+        paired_device = self.paired_clients.get(pair_id) if isinstance(pair_id, str) else None
+        device_id = offer[0] if offer else paired_device
+        if not device_id or device_id not in self.devices or pair_id in self.clients:
             await socket.close(code=1008, reason="Pair offer unavailable")
             return
-        device_id = offer[0]
-        del self.offers[pair_id]
+        if offer:
+            del self.offers[pair_id]
+            self.paired_clients[pair_id] = device_id
         self.clients[pair_id] = socket
         self.client_devices[pair_id] = device_id
         self.device_clients[device_id].add(pair_id)

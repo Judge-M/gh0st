@@ -37,6 +37,7 @@ from .models import (
     ToolSchema,
     WorkerReport,
 )
+from .relay_crypto import decrypt_persistent_secret, encrypt_persistent_secret
 
 
 class Base(DeclarativeBase):
@@ -166,6 +167,18 @@ class RelayPairRow(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
+class PairedDeviceRow(Base):
+    __tablename__ = "paired_devices"
+
+    pair_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(64), index=True)
+    secret_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    relay_url: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
 class StateLedger:
     """State Ledger Manager for gh0st, providing SQLite persistence for tickets, reports, quotas, and claims."""
 
@@ -239,6 +252,18 @@ class StateLedger:
     def get_task(self, task_id: str) -> Optional[TaskRow]:
         with self.get_session() as session:
             return session.get(TaskRow, task_id)
+
+    def list_tasks(self, limit: int = 50) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 100:
+            raise ValueError("Task list limit must be between 1 and 100")
+        with self.get_session() as session:
+            rows = (session.query(TaskRow)
+                    .order_by(TaskRow.created_at.desc(), TaskRow.task_id.desc())
+                    .limit(limit).all())
+            return [{"task_id": row.task_id, "description": row.description,
+                     "status": row.status, "created_at": row.created_at.isoformat(),
+                     "updated_at": row.updated_at.isoformat()}
+                    for row in rows]
 
     def set_task_status(self, task_id: str, status: str) -> None:
         with self.get_session() as session:
@@ -574,7 +599,8 @@ class StateLedger:
             raise ValueError("Pair offer TTL must be between 1 and 300 seconds")
         with self.get_session() as session:
             session.add(RelayPairRow(
-                pair_id=pair_id, device_id=device_id, secret=secret,
+                pair_id=pair_id, device_id=device_id,
+                secret=encrypt_persistent_secret(pair_id, secret),
                 relay_url=relay_url,
                 expires_at=self._utc_now() + timedelta(seconds=ttl_seconds),
             ))
@@ -585,8 +611,10 @@ class StateLedger:
             row = session.get(RelayPairRow, pair_id)
             if not row:
                 return None
+            secret = (decrypt_persistent_secret(row.pair_id, row.secret)
+                      if row.secret and row.status in {"pending", "offered"} else row.secret)
             return {"pair_id": row.pair_id, "device_id": row.device_id,
-                    "secret": row.secret, "relay_url": row.relay_url,
+                    "secret": secret, "relay_url": row.relay_url,
                     "status": row.status, "expires_at": row.expires_at}
 
     def list_live_relay_pairs(self, device_id: str) -> list[dict[str, Any]]:
@@ -597,7 +625,7 @@ class StateLedger:
                 RelayPairRow.expires_at > self._utc_now(),
             ).all()
             return [{"pair_id": row.pair_id, "device_id": row.device_id,
-                     "secret": row.secret, "relay_url": row.relay_url,
+                     "relay_url": row.relay_url,
                      "status": row.status, "expires_at": row.expires_at}
                     for row in rows]
 
@@ -612,7 +640,7 @@ class StateLedger:
                 return result.rowcount == 1
 
     def consume_relay_pair(self, pair_id: str, device_id: str) -> Optional[str]:
-        """Consume a one-time secret and erase its persisted copy."""
+        """Consume the QR offer and retain its key encrypted for authenticated reconnects."""
         with self.get_session() as session:
             with session.begin():
                 row = session.get(RelayPairRow, pair_id)
@@ -620,10 +648,72 @@ class StateLedger:
                         row.status not in {"pending", "offered"} or
                         row.expires_at <= self._utc_now()):
                     return None
-                secret = row.secret
+                secret = decrypt_persistent_secret(row.pair_id, row.secret)
+                session.add(PairedDeviceRow(
+                    pair_id=pair_id, device_id=device_id,
+                    secret_encrypted=encrypt_persistent_secret(pair_id, secret),
+                    relay_url=row.relay_url,
+                ))
                 row.secret = ""
                 row.status = "paired"
                 return secret
+
+    def get_paired_device(self, pair_id: str, device_id: Optional[str] = None) -> Optional[dict[str, Any]]:
+        with self.get_session() as session:
+            query = session.query(PairedDeviceRow).filter(
+                PairedDeviceRow.pair_id == pair_id,
+                PairedDeviceRow.revoked_at.is_(None),
+            )
+            if device_id is not None:
+                query = query.filter(PairedDeviceRow.device_id == device_id)
+            row = query.first()
+            if not row:
+                return None
+            return {"pair_id": row.pair_id, "device_id": row.device_id,
+                    "secret": decrypt_persistent_secret(row.pair_id, row.secret_encrypted),
+                    "relay_url": row.relay_url, "created_at": row.created_at,
+                    "last_seen_at": row.last_seen_at}
+
+    def list_paired_devices(self, device_id: str) -> list[dict[str, Any]]:
+        with self.get_session() as session:
+            rows = session.query(PairedDeviceRow).filter(
+                PairedDeviceRow.device_id == device_id,
+                PairedDeviceRow.revoked_at.is_(None),
+            ).order_by(PairedDeviceRow.created_at).all()
+            return [{"pair_id": row.pair_id, "device_id": row.device_id,
+                     "relay_url": row.relay_url, "created_at": row.created_at,
+                     "last_seen_at": row.last_seen_at}
+                    for row in rows]
+
+    def touch_paired_device(self, pair_id: str, device_id: str) -> bool:
+        with self.get_session() as session:
+            with session.begin():
+                result = session.execute(update(PairedDeviceRow).where(
+                    PairedDeviceRow.pair_id == pair_id,
+                    PairedDeviceRow.device_id == device_id,
+                    PairedDeviceRow.revoked_at.is_(None),
+                ).values(last_seen_at=self._utc_now()))
+                return result.rowcount == 1
+
+    def revoke_paired_device(self, pair_id: str, device_id: str) -> bool:
+        with self.get_session() as session:
+            with session.begin():
+                result = session.execute(update(PairedDeviceRow).where(
+                    PairedDeviceRow.pair_id == pair_id,
+                    PairedDeviceRow.device_id == device_id,
+                    PairedDeviceRow.revoked_at.is_(None),
+                ).values(revoked_at=self._utc_now(), secret_encrypted=""))
+                return result.rowcount == 1
+
+    def list_revoked_pair_ids(self, device_id: str, relay_url: Optional[str] = None) -> list[str]:
+        with self.get_session() as session:
+            query = session.query(PairedDeviceRow).filter(
+                PairedDeviceRow.device_id == device_id,
+                PairedDeviceRow.revoked_at.is_not(None),
+            )
+            if relay_url is not None:
+                query = query.filter(PairedDeviceRow.relay_url == relay_url)
+            return [row.pair_id for row in query.all()]
 
     def expire_relay_pairs(self) -> None:
         with self.get_session() as session:
