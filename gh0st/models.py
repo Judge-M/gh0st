@@ -112,18 +112,20 @@ class QuotaRecord(BaseModel):
     max_tokens_budget: int = Field(ge=1, description="Total token ceiling")
     tokens_consumed: int = Field(default=0, ge=0, description="Tokens used so far")
     tokens_reserved: int = Field(default=0, ge=0)
+    tokens_uncertain: int = Field(default=0, ge=0)
     max_cost_usd_budget: float = Field(ge=0, description="Total cost cap in USD")
     cost_usd_consumed: float = Field(default=0.0, ge=0, description="USD spent so far")
     cost_usd_reserved: float = Field(default=0.0, ge=0)
+    cost_usd_uncertain: float = Field(default=0.0, ge=0)
     is_active: bool = Field(default=True)
 
     @property
     def remaining_tokens(self) -> int:
-        return max(0, self.max_tokens_budget - self.tokens_consumed - self.tokens_reserved)
+        return max(0, self.max_tokens_budget - self.tokens_consumed - self.tokens_reserved - self.tokens_uncertain)
 
     @property
     def remaining_usd(self) -> float:
-        return max(0.0, self.max_cost_usd_budget - self.cost_usd_consumed - self.cost_usd_reserved)
+        return max(0.0, self.max_cost_usd_budget - self.cost_usd_consumed - self.cost_usd_reserved - self.cost_usd_uncertain)
 
 
 class GrantRequest(BaseModel):

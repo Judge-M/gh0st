@@ -5,7 +5,9 @@ import json
 import os
 import re
 import sys
+import threading
 import traceback
+import uuid
 from typing import Any, Callable, Optional
 
 import httpx
@@ -78,13 +80,29 @@ class EphemeralWorker:
         self.gateway = gateway or PluggableGatewayAdapter()
         self.sandbox_factory = sandbox_factory
 
-    def execute_turn(self, ticket_id: str, fan_out_cap: int = 25) -> WorkerReport:
+    def execute_turn(self, ticket_id: str, fan_out_cap: int = 25,
+                     claim_owner: Optional[str] = None) -> WorkerReport:
         ticket = self.db.get_ticket(ticket_id)
         if ticket is None:
             raise ValueError(f"Unknown ticket: {ticket_id}")
-        if not self.db.claim_ticket(ticket_id):
+        claim_owner = claim_owner or uuid.uuid4().hex
+        claimed = (self.db.owns_claim(ticket_id, claim_owner) if ticket.status == TicketStatus.RUNNING
+                   else self.db.claim_ticket(ticket_id, claim_owner))
+        if not claimed:
             raise ValueError(f"Ticket {ticket_id} has already been claimed")
-        quota = self.db.get_quota_record(ticket.task_id)
+        stop_heartbeat = threading.Event()
+
+        def heartbeat() -> None:
+            while not stop_heartbeat.wait(30):
+                try:
+                    if not self.db.renew_claim(ticket_id, claim_owner):
+                        return
+                except Exception:
+                    # An expired lease will be recovered if renewal cannot reach the ledger.
+                    return
+
+        heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+        heartbeat_thread.start()
         status = "success"
         output: dict[str, Any] = {}
         proposals: list[ChildTicketProposal] = []
@@ -97,6 +115,7 @@ class EphemeralWorker:
         diff = ""
         sandbox = None
         try:
+            quota = self.db.get_quota_record(ticket.task_id)
             if quota is None or not quota.is_active:
                 raise ValueError("Task quota is inactive")
             if not ticket.gateway_allowance.get("enabled"):
@@ -246,6 +265,9 @@ class EphemeralWorker:
             error = f"{type(exc).__name__}: {exc}"
             output = {"error": error}
 
+        stop_heartbeat.set()
+        heartbeat_thread.join(timeout=1)
+
         report = WorkerReport(
             ticket_id=ticket_id, task_id=ticket.task_id, status=status,
             output=output, stderr=error, diff=diff,
@@ -271,11 +293,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Execute one gh0st ticket and exit")
     parser.add_argument("ticket_id")
     parser.add_argument("--db-url", default=None)
+    parser.add_argument("--claim-owner", default=None)
     args = parser.parse_args()
     db = StateLedger(args.db_url)
     db.init_db()
     try:
-        report = EphemeralWorker(db).execute_turn(args.ticket_id)
+        report = EphemeralWorker(db).execute_turn(args.ticket_id, claim_owner=args.claim_owner)
         print(report.model_dump_json())
         sys.exit(0 if report.status == "success" else 1)
     except Exception:

@@ -73,9 +73,11 @@ paths:
                     properties:
                       tokens_consumed: {type: integer}
                       tokens_reserved: {type: integer}
+                      tokens_uncertain: {type: integer}
                       remaining_tokens: {type: integer}
                       cost_usd_consumed: {type: number}
                       cost_usd_reserved: {type: number}
+                      cost_usd_uncertain: {type: number}
                       remaining_usd: {type: number}
                   pending_tickets_count: {type: integer}
                   trusted_memory_count: {type: integer}
