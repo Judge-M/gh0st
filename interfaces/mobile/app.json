@@ -12,7 +12,8 @@
           "cameraPermission": "Allow gh0st to scan one-time pairing QR codes.",
           "recordAudioAndroid": false
         }
-      ]
+      ],
+      "expo-secure-store"
     ],
     "ios": {
       "supportsTablet": true,

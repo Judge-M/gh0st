@@ -184,6 +184,11 @@ def main() -> None:
     pair.add_argument("--device-id", default=os.getenv("GH0ST_DEVICE_ID", "local"))
     pair.add_argument("--qr-output", type=Path,
                       help="Write a scan-ready SVG containing the one-time pairing secret")
+    pairings = commands.add_parser("pairings", help="List mobile devices paired with this gh0st instance")
+    pairings.add_argument("--device-id", default=os.getenv("GH0ST_DEVICE_ID", "local"))
+    unpair = commands.add_parser("unpair", help="Revoke a mobile device pairing")
+    unpair.add_argument("pair_id", help="Pairing ID shown by `gh0st pairings`")
+    unpair.add_argument("--device-id", default=os.getenv("GH0ST_DEVICE_ID", "local"))
     grant = commands.add_parser("grant")
     grant.add_argument("grant_id")
     decision = grant.add_mutually_exclusive_group(required=True)
@@ -211,6 +216,16 @@ def main() -> None:
                 write_pair_qr(uri, args.qr_output)
                 print(f"One-time QR code written to {args.qr_output}; treat that file as a pairing secret.")
             print(uri)
+        if args.command == "pairings":
+            pairings = cli.db.list_paired_devices(args.device_id)
+            if not pairings:
+                print("No paired mobile devices")
+            for paired in pairings:
+                print(f"pair_id: {paired['pair_id']}\nrelay: {paired['relay_url']}\ncreated_at: {paired['created_at']}\nlast_seen_at: {paired['last_seen_at']}\n")
+        if args.command == "unpair":
+            if not cli.db.revoke_paired_device(args.pair_id, args.device_id):
+                raise ValueError(f"No active pairing found: {args.pair_id}")
+            print(f"Revoked pairing {args.pair_id}")
         if args.command == "grant":
             recorded = cli.db.decide_grant_request(args.grant_id, args.approve, args.operator)
             print(f"{recorded.grant_id}: {recorded.status} by {recorded.decided_by}")

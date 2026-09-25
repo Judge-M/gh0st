@@ -4,7 +4,7 @@
 **Architectural Blueprint:** Orchestrator-Free, Seam-Based Ephemeral Runtime ("No-Agent" Stack)
 **Status:** Approved Specification (v3 - Multi-Surface UI & Pluggable Router Edition)
 
-**Implementation note:** The local runtime executes model-requested commands inside a task-scoped clone through Linux bubblewrap. A self-hosted broker and one-time encrypted pairing support mobile status, bounded task requests, and recording grant decisions. The VS Code extension and Tauri desktop app connect to the local API; Ubuntu produced Debian and AppImage bundles. Linux validation on the current WSL environment measured quota preflight at 0.204 ms p95 and the Layla classifier at 0.0168 ms p95. Hosted relay deployment, offline push delivery, persistent pairing, physical mobile validation, and signed package publishing remain release gates.
+**Implementation note:** The local runtime executes model-requested commands inside a task-scoped clone through Linux bubblewrap. A self-hosted broker and encrypted persistent pairing support mobile status, bounded task requests, and recording grant decisions. The VS Code extension and Tauri desktop app connect to the local API; Ubuntu produced Debian and AppImage bundles. Linux validation on the current WSL environment measured quota preflight at 0.204 ms p95 and the Layla classifier at 0.0168 ms p95. Hosted relay deployment, offline push delivery, physical mobile reconnect/revocation validation, and signed package publishing remain release gates. The v4 handoff updates the model execution architecture; its in-process provider path and secret resolver are not implemented in this checkout yet.
 
 ---
 
