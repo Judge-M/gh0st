@@ -5,7 +5,8 @@ Persistence Layer: SQLite / SQLAlchemy ORM
 """
 
 import json
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from sqlalchemy import (
     Text,
     create_engine,
     inspect,
+    or_,
     update,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker, Session
@@ -77,6 +79,9 @@ class TicketRow(Base):
     max_tokens_allocated: Mapped[int] = mapped_column(Integer, default=4096)
     max_cost_usd: Mapped[float] = mapped_column(Float, default=0.50)
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    claim_owner: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=lambda: datetime.now(timezone.utc)
     )
@@ -112,9 +117,11 @@ class QuotaRecordRow(Base):
     max_tokens_budget: Mapped[int] = mapped_column(Integer, nullable=False)
     tokens_consumed: Mapped[int] = mapped_column(Integer, default=0)
     tokens_reserved: Mapped[int] = mapped_column(Integer, default=0)
+    tokens_uncertain: Mapped[int] = mapped_column(Integer, default=0)
     max_cost_usd_budget: Mapped[float] = mapped_column(Float, nullable=False)
     cost_usd_consumed: Mapped[float] = mapped_column(Float, default=0.0)
     cost_usd_reserved: Mapped[float] = mapped_column(Float, default=0.0)
+    cost_usd_uncertain: Mapped[float] = mapped_column(Float, default=0.0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -150,6 +157,13 @@ class GrantRequestRow(Base):
 class StateLedger:
     """State Ledger Manager for gh0st, providing SQLite persistence for tickets, reports, quotas, and claims."""
 
+    CLAIM_LEASE_SECONDS = 300
+
+    @staticmethod
+    def _utc_now() -> datetime:
+        # SQLite stores these timestamps without timezone metadata.
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+
     def __init__(self, db_url: Optional[str] = None):
         if db_url is None:
             db_path = Path.home() / ".gh0st" / "state.db"
@@ -170,6 +184,9 @@ class StateLedger:
                     "permitted_local_capabilities_json": "TEXT NOT NULL DEFAULT '[\"local_shell\"]'",
                     "gateway_allowance_json": "TEXT NOT NULL DEFAULT '{}'",
                     "assigned_model": "TEXT NOT NULL DEFAULT ''",
+                    "claimed_at": "DATETIME",
+                    "claim_owner": "VARCHAR(64)",
+                    "lease_expires_at": "DATETIME",
                 },
                 "worker_reports": {
                     "diff": "TEXT NOT NULL DEFAULT ''",
@@ -180,6 +197,8 @@ class StateLedger:
                 "quota_records": {
                     "tokens_reserved": "INTEGER NOT NULL DEFAULT 0",
                     "cost_usd_reserved": "FLOAT NOT NULL DEFAULT 0",
+                    "tokens_uncertain": "INTEGER NOT NULL DEFAULT 0",
+                    "cost_usd_uncertain": "FLOAT NOT NULL DEFAULT 0",
                 },
                 "grant_requests": {
                     "decided_by": "VARCHAR(128)",
@@ -226,9 +245,11 @@ class StateLedger:
                 max_tokens_budget=quota.max_tokens_budget,
                 tokens_consumed=quota.tokens_consumed,
                 tokens_reserved=quota.tokens_reserved,
+                tokens_uncertain=quota.tokens_uncertain,
                 max_cost_usd_budget=quota.max_cost_usd_budget,
                 cost_usd_consumed=quota.cost_usd_consumed,
                 cost_usd_reserved=quota.cost_usd_reserved,
+                cost_usd_uncertain=quota.cost_usd_uncertain,
                 is_active=quota.is_active,
             )
             session.add(row)
@@ -246,9 +267,11 @@ class StateLedger:
                 max_tokens_budget=row.max_tokens_budget,
                 tokens_consumed=row.tokens_consumed,
                 tokens_reserved=row.tokens_reserved,
+                tokens_uncertain=row.tokens_uncertain,
                 max_cost_usd_budget=row.max_cost_usd_budget,
                 cost_usd_consumed=row.cost_usd_consumed,
                 cost_usd_reserved=row.cost_usd_reserved,
+                cost_usd_uncertain=row.cost_usd_uncertain,
                 is_active=row.is_active,
             )
 
@@ -267,9 +290,11 @@ class StateLedger:
                 max_tokens_budget=row.max_tokens_budget,
                 tokens_consumed=row.tokens_consumed,
                 tokens_reserved=row.tokens_reserved,
+                tokens_uncertain=row.tokens_uncertain,
                 max_cost_usd_budget=row.max_cost_usd_budget,
                 cost_usd_consumed=row.cost_usd_consumed,
                 cost_usd_reserved=row.cost_usd_reserved,
+                cost_usd_uncertain=row.cost_usd_uncertain,
                 is_active=row.is_active,
             )
 
@@ -282,8 +307,8 @@ class StateLedger:
                     .where(
                         QuotaRecordRow.task_id == ticket.task_id,
                         QuotaRecordRow.is_active.is_(True),
-                        QuotaRecordRow.max_tokens_budget - QuotaRecordRow.tokens_consumed - QuotaRecordRow.tokens_reserved >= ticket.max_tokens_allocated,
-                        QuotaRecordRow.max_cost_usd_budget - QuotaRecordRow.cost_usd_consumed - QuotaRecordRow.cost_usd_reserved >= ticket.max_cost_usd,
+                        QuotaRecordRow.max_tokens_budget - QuotaRecordRow.tokens_consumed - QuotaRecordRow.tokens_reserved - QuotaRecordRow.tokens_uncertain >= ticket.max_tokens_allocated,
+                        QuotaRecordRow.max_cost_usd_budget - QuotaRecordRow.cost_usd_consumed - QuotaRecordRow.cost_usd_reserved - QuotaRecordRow.cost_usd_uncertain >= ticket.max_cost_usd,
                     )
                     .values(
                         tokens_reserved=QuotaRecordRow.tokens_reserved + ticket.max_tokens_allocated,
@@ -361,15 +386,102 @@ class StateLedger:
             session.commit()
             return True
 
-    def claim_ticket(self, ticket_id: str) -> bool:
+    def claim_ticket(self, ticket_id: str, owner: Optional[str] = None) -> bool:
+        now = self._utc_now()
+        owner = owner or uuid.uuid4().hex
         with self.get_session() as session:
             with session.begin():
                 result = session.execute(
                     update(TicketRow)
                     .where(TicketRow.ticket_id == ticket_id, TicketRow.status == TicketStatus.PENDING.value)
-                    .values(status=TicketStatus.RUNNING.value)
+                    .values(status=TicketStatus.RUNNING.value, claimed_at=now,
+                            claim_owner=owner,
+                            lease_expires_at=now + timedelta(seconds=self.CLAIM_LEASE_SECONDS))
                 )
                 return result.rowcount == 1
+
+    def owns_claim(self, ticket_id: str, owner: str) -> bool:
+        with self.get_session() as session:
+            return session.query(TicketRow.ticket_id).filter(
+                TicketRow.ticket_id == ticket_id,
+                TicketRow.status == TicketStatus.RUNNING.value,
+                TicketRow.claim_owner == owner,
+            ).first() is not None
+
+    def renew_claim(self, ticket_id: str, owner: str) -> bool:
+        with self.get_session() as session:
+            with session.begin():
+                result = session.execute(
+                    update(TicketRow)
+                    .where(TicketRow.ticket_id == ticket_id, TicketRow.status == TicketStatus.RUNNING.value,
+                           TicketRow.claim_owner == owner)
+                    .values(lease_expires_at=self._utc_now() + timedelta(seconds=self.CLAIM_LEASE_SECONDS))
+                )
+                return result.rowcount == 1
+
+    def recover_abandoned_ticket(self, ticket_id: str, reason: str,
+                                 *, worker_exited: bool = False,
+                                 expected_owner: Optional[str] = None,
+                                 now: Optional[datetime] = None) -> bool:
+        """Halt an expired claim, or a child known to have exited without a report.
+
+        Unknown gateway usage is held as uncertain budget so it cannot be spent
+        again. The ticket is never automatically replayed against its clone.
+        """
+        cutoff = (now or self._utc_now()).replace(tzinfo=None)
+        if worker_exited and not expected_owner:
+            raise ValueError("An exited worker's claim owner is required for recovery")
+        with self.get_session() as session:
+            with session.begin():
+                conditions = [TicketRow.ticket_id == ticket_id,
+                              TicketRow.status == TicketStatus.RUNNING.value]
+                if not worker_exited:
+                    conditions.append(or_(TicketRow.lease_expires_at.is_(None),
+                                          TicketRow.lease_expires_at <= cutoff))
+                else:
+                    conditions.append(TicketRow.claim_owner == expected_owner)
+                result = session.execute(
+                    update(TicketRow).where(*conditions)
+                    .values(status=TicketStatus.HALTED.value, lease_expires_at=None)
+                )
+                if result.rowcount != 1:
+                    return False
+                ticket = session.get(TicketRow, ticket_id)
+                session.add(WorkerReportRow(
+                    report_id=WorkerReport(ticket_id=ticket_id, task_id=ticket.task_id,
+                                           status="halted").report_id,
+                    ticket_id=ticket_id, task_id=ticket.task_id, status="halted",
+                    output_json=json.dumps({"error": reason, "usage": "unverified"}),
+                    stderr=reason, unresolved_failures_json=json.dumps([reason]),
+                ))
+                reserved = session.execute(
+                    update(QuotaRecordRow)
+                    .where(QuotaRecordRow.task_id == ticket.task_id,
+                           QuotaRecordRow.tokens_reserved >= ticket.max_tokens_allocated,
+                           QuotaRecordRow.cost_usd_reserved >= ticket.max_cost_usd)
+                    .values(
+                        tokens_reserved=QuotaRecordRow.tokens_reserved - ticket.max_tokens_allocated,
+                        cost_usd_reserved=QuotaRecordRow.cost_usd_reserved - ticket.max_cost_usd,
+                        tokens_uncertain=QuotaRecordRow.tokens_uncertain + ticket.max_tokens_allocated,
+                        cost_usd_uncertain=QuotaRecordRow.cost_usd_uncertain + ticket.max_cost_usd,
+                    )
+                )
+                if reserved.rowcount != 1:
+                    raise ValueError("Ticket reservation is missing during recovery")
+                session.execute(update(TaskRow).where(TaskRow.task_id == ticket.task_id)
+                                .values(status="halted"))
+                return True
+
+    def recover_expired_claims(self, task_id: str) -> list[str]:
+        now = self._utc_now()
+        with self.get_session() as session:
+            ticket_ids = [ticket_id for (ticket_id,) in session.query(TicketRow.ticket_id).filter(
+                TicketRow.task_id == task_id,
+                TicketRow.status == TicketStatus.RUNNING.value,
+                or_(TicketRow.lease_expires_at.is_(None), TicketRow.lease_expires_at <= now),
+            ).all()]
+        return [ticket_id for ticket_id in ticket_ids
+                if self.recover_abandoned_ticket(ticket_id, "Worker claim expired before a report", now=now)]
 
     # --- Worker Report Operations ---
     def save_worker_report(self, report: WorkerReport) -> WorkerReport:
@@ -378,6 +490,17 @@ class StateLedger:
                 ticket = session.get(TicketRow, report.ticket_id)
                 if ticket is None or ticket.task_id != report.task_id or ticket.status != TicketStatus.RUNNING.value:
                     raise ValueError("Ticket is not claimed by this task")
+                final_status = (
+                    TicketStatus.COMPLETED.value if report.status == "success" else
+                    TicketStatus.HALTED.value if report.status == "halted" else
+                    TicketStatus.FAILED.value
+                )
+                claimed = session.execute(update(TicketRow).where(
+                    TicketRow.ticket_id == report.ticket_id,
+                    TicketRow.status == TicketStatus.RUNNING.value,
+                ).values(status=final_status, lease_expires_at=None))
+                if claimed.rowcount != 1:
+                    raise ValueError("Ticket claim was already finalized")
                 session.add(WorkerReportRow(
                     report_id=report.report_id, ticket_id=report.ticket_id,
                     task_id=report.task_id, status=report.status,
@@ -389,14 +512,11 @@ class StateLedger:
                     tokens_used=report.tokens_used, cost_usd=report.cost_usd,
                     child_proposals_json=json.dumps([p.model_dump() for p in report.child_ticket_proposals]),
                 ))
-                ticket.status = (
-                    TicketStatus.COMPLETED.value if report.status == "success" else
-                    TicketStatus.HALTED.value if report.status == "halted" else
-                    TicketStatus.FAILED.value
-                )
-                session.execute(
+                charged = session.execute(
                     update(QuotaRecordRow)
-                    .where(QuotaRecordRow.task_id == report.task_id)
+                    .where(QuotaRecordRow.task_id == report.task_id,
+                           QuotaRecordRow.tokens_reserved >= ticket.max_tokens_allocated,
+                           QuotaRecordRow.cost_usd_reserved >= ticket.max_cost_usd)
                     .values(
                         tokens_consumed=QuotaRecordRow.tokens_consumed + report.tokens_used,
                         cost_usd_consumed=QuotaRecordRow.cost_usd_consumed + report.cost_usd,
@@ -404,6 +524,8 @@ class StateLedger:
                         cost_usd_reserved=QuotaRecordRow.cost_usd_reserved - ticket.max_cost_usd,
                     )
                 )
+                if charged.rowcount != 1:
+                    raise ValueError("Ticket reservation is missing during reporting")
         return report
 
     def get_worker_report(self, ticket_id: str) -> Optional[WorkerReport]:

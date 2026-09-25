@@ -46,6 +46,16 @@ class Gh0stCLI:
         return task_id
 
     def process_queue(self, task_id: str, gateway_url: Optional[str] = None) -> None:
+        task = self.db.get_task(task_id)
+        if task is None or task.status != "active":
+            raise ValueError(f"Task is not active: {task_id}")
+        if self.db.recover_expired_claims(task_id):
+            return
+        if self.db.get_task(task_id).status != "active":
+            return
+        if any(item.status == TicketStatus.RUNNING for item in self.db.list_task_tickets(task_id)):
+            print("A worker claim is still live; retry after its lease expires", file=sys.stderr)
+            return
         environment = os.environ.copy()
         environment["GH0ST_WORKSPACE_ROOT"] = str(self.workspaces.root)
         if gateway_url:
@@ -56,9 +66,19 @@ class Gh0stCLI:
             if not pending:
                 break
             next_ticket = pending[0]
-            result = subprocess.run([sys.executable, "-m", "gh0st.worker", next_ticket.ticket_id,
-                                     "--db-url", self.db.db_url], env=environment, check=False,
-                                    capture_output=True, text=True)
+            owner = uuid.uuid4().hex
+            if not self.db.claim_ticket(next_ticket.ticket_id, owner):
+                return
+            try:
+                result = subprocess.run([sys.executable, "-m", "gh0st.worker", next_ticket.ticket_id,
+                                         "--db-url", self.db.db_url, "--claim-owner", owner],
+                                        env=environment, check=False, capture_output=True, text=True)
+            except OSError as exc:
+                self.db.recover_abandoned_ticket(
+                    next_ticket.ticket_id, f"Worker could not start: {exc}",
+                    worker_exited=True, expected_owner=owner,
+                )
+                return
             if result.stdout:
                 print(result.stdout.strip())
             if result.stderr:
@@ -66,7 +86,19 @@ class Gh0stCLI:
             processed += 1
             if result.returncode != 0:
                 report = self.db.get_worker_report(next_ticket.ticket_id)
+                if report is None:
+                    self.db.recover_abandoned_ticket(
+                        next_ticket.ticket_id, "Worker exited without a report",
+                        worker_exited=True, expected_owner=owner,
+                    )
+                    report = self.db.get_worker_report(next_ticket.ticket_id)
                 self.db.set_task_status(task_id, "halted" if report and report.status == "halted" else "failed")
+                return
+            if self.db.get_worker_report(next_ticket.ticket_id) is None:
+                self.db.recover_abandoned_ticket(
+                    next_ticket.ticket_id, "Worker exited without a report",
+                    worker_exited=True, expected_owner=owner,
+                )
                 return
 
         tickets = self.db.list_task_tickets(task_id)
@@ -95,8 +127,10 @@ class Gh0stCLI:
         tickets = self.db.list_task_tickets(task_id)
         status = {"task_id": task_id, "status": task.status,
                   "tokens_consumed": quota.tokens_consumed, "tokens_reserved": quota.tokens_reserved,
+                  "tokens_uncertain": quota.tokens_uncertain,
                   "remaining_tokens": quota.remaining_tokens,
                   "cost_usd_consumed": quota.cost_usd_consumed, "cost_usd_reserved": quota.cost_usd_reserved,
+                  "cost_usd_uncertain": quota.cost_usd_uncertain,
                   "remaining_usd": quota.remaining_usd,
                   "pending_tickets_count": sum(t.status == TicketStatus.PENDING for t in tickets),
                   "trusted_memory_count": len(self.db.get_trusted_valid_claims(task_id)),
@@ -122,6 +156,9 @@ def main() -> None:
     run.add_argument("--modality", choices=["text", "code", "vision", "image"])
     status = commands.add_parser("status")
     status.add_argument("task_id")
+    resume = commands.add_parser("resume", help="Continue an active task and recover expired worker claims")
+    resume.add_argument("task_id")
+    resume.add_argument("--gateway-url")
     grant = commands.add_parser("grant")
     grant.add_argument("grant_id")
     decision = grant.add_mutually_exclusive_group(required=True)
@@ -140,6 +177,8 @@ def main() -> None:
             sys.exit(0 if cli.db.get_task(task_id).status == "completed" else 1)
         if args.command == "status":
             cli.show_status(args.task_id)
+        if args.command == "resume":
+            cli.process_queue(args.task_id, args.gateway_url)
         if args.command == "grant":
             recorded = cli.db.decide_grant_request(args.grant_id, args.approve, args.operator)
             print(f"{recorded.grant_id}: {recorded.status} by {recorded.decided_by}")

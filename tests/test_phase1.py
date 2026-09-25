@@ -5,6 +5,7 @@ import platform
 import shutil
 import sqlite3
 import subprocess
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -12,8 +13,8 @@ import httpx
 from fastapi.testclient import TestClient
 
 from gh0st.catalog import ModelCatalog, ModelTarget
-from gh0st.db import StateLedger
-from gh0st.models import ChildTicketProposal, ExecutionTier, GrantRequest, QuotaRecord, WorkerReport
+from gh0st.db import StateLedger, TicketRow
+from gh0st.models import ChildTicketProposal, ExecutionTier, GrantRequest, QuotaRecord, TicketStatus, WorkerReport
 from gh0st.cli import Gh0stCLI
 from gh0st.relay import create_app
 from gh0st.router import System1Router
@@ -96,6 +97,106 @@ def test_atomic_claim_and_budget_reservation(tmp_path, monkeypatch):
     assert db.get_quota_record("task_one").tokens_consumed == 50
 
 
+def test_expired_claim_recovery_halts_once_and_preserves_unknown_spend(tmp_path, monkeypatch):
+    db, manager, catalog = configured_ledger(tmp_path, monkeypatch)
+    workspace, source_commit = manager.create("task_one")
+    _, ticket = System1Router(db, catalog=catalog).route(
+        "Fix code", "task_one", workspace_path=workspace, source_commit=source_commit,
+    )
+    owner = "recovery_test"
+    assert db.claim_ticket(ticket.ticket_id, owner)
+    assert not db.recover_abandoned_ticket(ticket.ticket_id, "expired")
+    assert db.renew_claim(ticket.ticket_id, owner)
+    future = datetime.now(timezone.utc) + timedelta(seconds=db.CLAIM_LEASE_SECONDS + 1)
+    assert db.recover_abandoned_ticket(ticket.ticket_id, "Worker claim expired", now=future)
+    assert not db.recover_abandoned_ticket(ticket.ticket_id, "duplicate", now=future)
+    assert not db.renew_claim(ticket.ticket_id, owner)
+    assert db.get_ticket(ticket.ticket_id).status == TicketStatus.HALTED
+    assert db.get_task("task_one").status == "halted"
+    report = db.get_worker_report(ticket.ticket_id)
+    assert report.status == "halted"
+    assert report.output["usage"] == "unverified"
+    quota = db.get_quota_record("task_one")
+    assert quota.tokens_reserved == 0
+    assert quota.cost_usd_reserved == 0
+    assert quota.tokens_uncertain == ticket.max_tokens_allocated
+    assert quota.cost_usd_uncertain == ticket.max_cost_usd
+    assert quota.remaining_tokens == 0
+    with pytest.raises(ValueError):
+        db.save_worker_report(WorkerReport(
+            ticket_id=ticket.ticket_id, task_id="task_one", status="success",
+        ))
+
+
+def test_worker_exit_without_report_is_recovered_immediately(tmp_path, monkeypatch):
+    db, manager, catalog = configured_ledger(tmp_path, monkeypatch)
+    workspace, source_commit = manager.create("task_one")
+    _, ticket = System1Router(db, catalog=catalog).route(
+        "Fix code", "task_one", workspace_path=workspace, source_commit=source_commit,
+    )
+    def killed_worker(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 137, "", "killed")
+
+    monkeypatch.setattr("gh0st.cli.subprocess.run", killed_worker)
+    Gh0stCLI(db.db_url, str(manager.root)).process_queue("task_one")
+    assert db.get_task("task_one").status == "halted"
+    assert db.get_worker_report(ticket.ticket_id).output["usage"] == "unverified"
+
+
+def test_worker_exit_before_execution_keeps_allocation_uncertain(tmp_path, monkeypatch):
+    db, manager, catalog = configured_ledger(tmp_path, monkeypatch)
+    workspace, source_commit = manager.create("task_one")
+    _, ticket = System1Router(db, catalog=catalog).route(
+        "Fix code", "task_one", workspace_path=workspace, source_commit=source_commit,
+    )
+    monkeypatch.setattr("gh0st.cli.subprocess.run", lambda *args, **kwargs:
+                        subprocess.CompletedProcess(args[0], 1, "", "import failed"))
+    Gh0stCLI(db.db_url, str(manager.root)).process_queue("task_one")
+    assert db.get_task("task_one").status == "halted"
+    assert db.get_ticket(ticket.ticket_id).status == TicketStatus.HALTED
+    assert db.get_worker_report(ticket.ticket_id).status == "halted"
+    quota = db.get_quota_record("task_one")
+    assert quota.tokens_reserved == 0
+    assert quota.tokens_uncertain == ticket.max_tokens_allocated
+    assert quota.remaining_tokens == 0
+
+
+def test_duplicate_dispatch_does_not_start_second_worker(tmp_path, monkeypatch):
+    db, manager, catalog = configured_ledger(tmp_path, monkeypatch)
+    workspace, source_commit = manager.create("task_one")
+    _, ticket = System1Router(db, catalog=catalog).route(
+        "Fix code", "task_one", workspace_path=workspace, source_commit=source_commit,
+    )
+    launches = []
+
+    def first_worker(*args, **kwargs):
+        launches.append(args[0])
+        Gh0stCLI(db.db_url, str(manager.root)).process_queue("task_one")
+        return subprocess.CompletedProcess(args[0], 137, "", "killed")
+
+    monkeypatch.setattr("gh0st.cli.subprocess.run", first_worker)
+    Gh0stCLI(db.db_url, str(manager.root)).process_queue("task_one")
+    assert len(launches) == 1
+    assert db.get_ticket(ticket.ticket_id).status == TicketStatus.HALTED
+    assert db.get_quota_record("task_one").tokens_uncertain == ticket.max_tokens_allocated
+
+
+def test_resume_recovers_claim_left_by_previous_process(tmp_path, monkeypatch):
+    db, manager, catalog = configured_ledger(tmp_path, monkeypatch)
+    workspace, source_commit = manager.create("task_one")
+    _, ticket = System1Router(db, catalog=catalog).route(
+        "Fix code", "task_one", workspace_path=workspace, source_commit=source_commit,
+    )
+    assert db.claim_ticket(ticket.ticket_id)
+    with db.get_session() as session:
+        session.get(TicketRow, ticket.ticket_id).lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+        session.commit()
+    Gh0stCLI(db.db_url, str(manager.root)).process_queue("task_one")
+    assert db.get_ticket(ticket.ticket_id).status == TicketStatus.HALTED
+    assert db.get_worker_report(ticket.ticket_id).output["usage"] == "unverified"
+    assert db.get_quota_record("task_one").tokens_uncertain == ticket.max_tokens_allocated
+
+
 def test_model_quality_capacity_and_explicit_override():
     catalog = ModelCatalog([
         ModelTarget(name="economy", gateway_model="cheap", modalities={"code"},
@@ -125,6 +226,28 @@ def response(command=None, purpose="other", action="run_command", content=""):
         arguments = {"action": action, "action_type": "git_push", "details": {"ref": "main"}}
     calls = [{"id": "call_1", "function": {"name": "local_workbench", "arguments": json.dumps(arguments)}}] if action else []
     return {"content": content, "tool_calls": calls, "total_tokens": 25, "cost_usd": 0.01}
+
+
+def test_dispatch_claim_is_bound_to_its_worker(tmp_path, monkeypatch):
+    db, manager, catalog = configured_ledger(tmp_path, monkeypatch)
+    workspace, source_commit = manager.create("task_one")
+    _, ticket = System1Router(db, catalog=catalog).route(
+        "Fix code", "task_one", workspace_path=workspace, source_commit=source_commit,
+    )
+    assert db.claim_ticket(ticket.ticket_id, "owner_one")
+    assert not db.renew_claim(ticket.ticket_id, "owner_two")
+    assert not db.recover_abandoned_ticket(
+        ticket.ticket_id, "wrong worker", worker_exited=True,
+        expected_owner="owner_two",
+    )
+    with pytest.raises(ValueError):
+        EphemeralWorker(db, SequenceGateway([])).execute_turn(ticket.ticket_id,
+                                                                claim_owner="owner_two")
+    report = EphemeralWorker(db, SequenceGateway([response(action="request_grant")])).execute_turn(
+        ticket.ticket_id, claim_owner="owner_one",
+    )
+    assert report.status == "halted"
+    assert db.get_quota_record("task_one").tokens_reserved == 0
 
 
 def test_external_action_is_logged_without_execution(tmp_path, monkeypatch):
@@ -198,8 +321,8 @@ def test_existing_sqlite_ledger_receives_phase1_columns(tmp_path):
         ticket_columns = {row[1] for row in connection.execute("PRAGMA table_info(tickets)")}
         quota_columns = {row[1] for row in connection.execute("PRAGMA table_info(quota_records)")}
         report_columns = {row[1] for row in connection.execute("PRAGMA table_info(worker_reports)")}
-    assert {"workspace_path", "source_commit", "assigned_model"} <= ticket_columns
-    assert {"tokens_reserved", "cost_usd_reserved"} <= quota_columns
+    assert {"workspace_path", "source_commit", "assigned_model", "claimed_at", "claim_owner", "lease_expires_at"} <= ticket_columns
+    assert {"tokens_reserved", "cost_usd_reserved", "tokens_uncertain", "cost_usd_uncertain"} <= quota_columns
     assert {"diff", "commands_executed_json", "test_results_json"} <= report_columns
 
 
