@@ -10,6 +10,7 @@ from typing import Optional
 from .db import StateLedger
 from .models import QuotaRecord, TicketStatus
 from .router import System1Router
+from .relay_crypto import new_pairing
 from .workspace import WorkspaceManager
 
 
@@ -159,6 +160,9 @@ def main() -> None:
     resume = commands.add_parser("resume", help="Continue an active task and recover expired worker claims")
     resume.add_argument("task_id")
     resume.add_argument("--gateway-url")
+    pair = commands.add_parser("pair", help="Create a one-time encrypted relay pairing URI")
+    pair.add_argument("--relay-url", default=os.getenv("GH0ST_RELAY_URL", ""))
+    pair.add_argument("--device-id", default=os.getenv("GH0ST_DEVICE_ID", "local"))
     grant = commands.add_parser("grant")
     grant.add_argument("grant_id")
     decision = grant.add_mutually_exclusive_group(required=True)
@@ -179,6 +183,10 @@ def main() -> None:
             cli.show_status(args.task_id)
         if args.command == "resume":
             cli.process_queue(args.task_id, args.gateway_url)
+        if args.command == "pair":
+            pair_id, secret, uri = new_pairing(args.relay_url, args.device_id)
+            cli.db.create_relay_pair(pair_id, args.device_id, secret, args.relay_url)
+            print(uri)
         if args.command == "grant":
             recorded = cli.db.decide_grant_request(args.grant_id, args.approve, args.operator)
             print(f"{recorded.grant_id}: {recorded.status} by {recorded.decided_by}")
@@ -187,7 +195,7 @@ def main() -> None:
                 raise ValueError("Set GH0ST_API_TOKEN before binding the API beyond loopback")
             import uvicorn
             from .relay import create_app
-            uvicorn.run(create_app(cli.db), host=args.host, port=args.port)
+            uvicorn.run(create_app(cli.db, str(cli.workspaces.root)), host=args.host, port=args.port)
     except ValueError as exc:
         parser.exit(2, f"gh0st: {exc}\n")
 

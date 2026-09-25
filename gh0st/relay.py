@@ -13,12 +13,14 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 from .cli import Gh0stCLI
 from .db import StateLedger
 from .models import QuotaRecord, TicketStatus
 from .router import System1Router
 from .workspace import WorkspaceManager
+from .relay_crypto import PairCipher
 
 
 class RunRequest(BaseModel):
@@ -36,12 +38,13 @@ class GrantDecision(BaseModel):
     operator_id: str = Field(min_length=1)
 
 
-def create_app(db: Optional[StateLedger] = None) -> FastAPI:
+def create_app(db: Optional[StateLedger] = None,
+               workspace_root: Optional[str] = None) -> FastAPI:
     ledger = db or StateLedger()
     ledger.init_db()
     app = FastAPI(title="gh0st Control API", version="0.1.0")
     api_token = os.getenv("GH0ST_API_TOKEN", "")
-    workspaces = WorkspaceManager()
+    workspaces = WorkspaceManager(workspace_root)
 
     def authorize(authorization: Optional[str]) -> None:
         if api_token and authorization != f"Bearer {api_token}":
@@ -129,29 +132,156 @@ def create_app(db: Optional[StateLedger] = None) -> FastAPI:
 
 
 class CloudRelayClient:
-    """Authenticated outbound transport for a separately hosted relay broker."""
+    """Outbound daemon connection. Only encrypted paired commands are accepted."""
 
-    def __init__(self, relay_url: str, device_id: str, relay_token: str):
-        if not relay_url.startswith("wss://"):
-            raise ValueError("Relay URL must use wss://")
+    def __init__(self, relay_url: str, device_id: str, relay_token: str,
+                 db: Optional[StateLedger] = None, workspace_root: Optional[str] = None):
+        if not relay_url.startswith("wss://") and not relay_url.startswith("ws://127.0.0.1:"):
+            raise ValueError("Relay URL must use wss:// outside loopback")
         if not relay_token:
             raise ValueError("Relay token is required")
         self.relay_url = relay_url
         self.device_id = device_id
         self.relay_token = relay_token
+        self.db = db or StateLedger()
+        self.db.init_db()
+        self.cli = Gh0stCLI(self.db.db_url, workspace_root)
+        self.background_tasks: set[asyncio.Task] = set()
+
+    async def _publish_offers(self, socket, sent: set[str]) -> None:
+        while True:
+            self.db.expire_relay_pairs()
+            for pair in self.db.list_live_relay_pairs(self.device_id):
+                if pair["relay_url"] == self.relay_url and pair["pair_id"] not in sent:
+                    await socket.send(json.dumps({"message_type": "pair_offer",
+                                                  "pair_id": pair["pair_id"]}))
+                    sent.add(pair["pair_id"])
+            await asyncio.sleep(2)
+
+    async def _send_encrypted(self, socket, cipher: PairCipher, payload: dict) -> None:
+        await socket.send(json.dumps(cipher.encrypt(payload)))
+
+    def _task_snapshot(self, task_id: str) -> dict:
+        task = self.db.get_task(task_id)
+        quota = self.db.get_quota_record(task_id)
+        if not task or not quota:
+            raise ValueError("Unknown task")
+        return {"task_id": task_id, "status": task.status,
+                "remaining_tokens": quota.remaining_tokens,
+                "remaining_usd": quota.remaining_usd,
+                "tokens_consumed": quota.tokens_consumed,
+                "cost_usd_consumed": quota.cost_usd_consumed,
+                "grant_requests": [grant.model_dump(mode="json")
+                                   for grant in self.db.list_grant_requests(task_id)]}
+
+    async def _handle_action(self, socket, cipher: PairCipher,
+                             payload: dict, seen_actions: set[str]) -> None:
+        action_id = payload.get("action_id")
+        action = payload.get("action_type")
+        if not isinstance(action_id, str) or not action_id.startswith("act_") or action_id in seen_actions:
+            return
+        seen_actions.add(action_id)
+        try:
+            if action == "status":
+                result = self._task_snapshot(str(payload.get("task_id") or ""))
+            elif action in {"approve_grant", "reject_grant"}:
+                grant_id = str(payload.get("grant_id") or "")
+                task_id = str(payload.get("task_id") or "")
+                if not any(grant.grant_id == grant_id for grant in self.db.list_grant_requests(task_id)):
+                    raise ValueError("Grant does not belong to the requested task")
+                grant = self.db.decide_grant_request(
+                    grant_id, action == "approve_grant",
+                    f"paired:{self.device_id}:{cipher.pair_id}",
+                )
+                result = {"grant_id": grant.grant_id, "status": grant.status}
+            elif action == "dispatch_task":
+                prompt = str(payload.get("prompt") or "").strip()
+                budget_usd = float(payload.get("budget_usd", 5))
+                budget_tokens = int(payload.get("budget_tokens", 100000))
+                if not prompt or len(prompt) > 8000:
+                    raise ValueError("Prompt must be 1 to 8000 characters")
+                if not (0 < budget_usd <= float(os.getenv("GH0ST_RELAY_MAX_BUDGET_USD", "5"))):
+                    raise ValueError("Remote task exceeds the configured USD cap")
+                if not (0 < budget_tokens <= int(os.getenv("GH0ST_RELAY_MAX_TOKENS", "100000"))):
+                    raise ValueError("Remote task exceeds the configured token cap")
+                task_id = f"task_{uuid.uuid4().hex[:12]}"
+                source_repo = os.getenv("GH0ST_RELAY_SOURCE_REPO")
+
+                async def run_task() -> None:
+                    try:
+                        await asyncio.to_thread(self.cli.run_prompt, prompt,
+                                                task_id=task_id, budget_usd=budget_usd,
+                                                budget_tokens=budget_tokens,
+                                                source_repo=source_repo)
+                        await self._send_encrypted(socket, cipher,
+                                                   {"message_type": "task_update", **self._task_snapshot(task_id)})
+                    except ConnectionClosed:
+                        # The task remains inspectable in the local ledger after a disconnect.
+                        pass
+                    except Exception as exc:
+                        try:
+                            await self._send_encrypted(socket, cipher,
+                                                       {"message_type": "task_update",
+                                                        "task_id": task_id, "status": "failed",
+                                                        "error": str(exc)})
+                        except ConnectionClosed:
+                            pass
+
+                task = asyncio.create_task(run_task())
+                self.background_tasks.add(task)
+                task.add_done_callback(self.background_tasks.discard)
+                result = {"task_id": task_id, "status": "accepted"}
+            else:
+                raise ValueError("Unsupported remote action")
+            await self._send_encrypted(socket, cipher, {"message_type": "action_result",
+                                                        "action_id": action_id, "ok": True,
+                                                        "result": result})
+        except (ValueError, TypeError) as exc:
+            await self._send_encrypted(socket, cipher, {"message_type": "action_result",
+                                                        "action_id": action_id, "ok": False,
+                                                        "error": str(exc)})
 
     async def run(self) -> None:
         while True:
             try:
                 async with connect(self.relay_url, additional_headers={"Authorization": f"Bearer {self.relay_token}"}) as socket:
                     await socket.send(json.dumps({"message_type": "device_register", "device_id": self.device_id}))
-                    async for message in socket:
-                        # A broker and pairing protocol must authenticate commands before execution.
-                        # Until one is configured, the client only accepts heartbeat messages.
-                        payload = json.loads(message)
-                        if payload.get("message_type") == "ping":
-                            await socket.send(json.dumps({"message_type": "pong", "device_id": self.device_id}))
-            except (OSError, ValueError):
+                    registered = json.loads(await socket.recv())
+                    if registered.get("message_type") != "device_registered":
+                        raise ValueError("Broker did not authenticate the device")
+                    sent_offers: set[str] = set()
+                    ciphers: dict[str, PairCipher] = {}
+                    seen_actions: dict[str, set[str]] = {}
+                    offer_task = asyncio.create_task(self._publish_offers(socket, sent_offers))
+                    try:
+                        async for message in socket:
+                            payload = json.loads(message)
+                            pair_id = payload.get("pair_id")
+                            kind = payload.get("message_type")
+                            if kind == "offer_ready" and pair_id in sent_offers:
+                                self.db.set_relay_pair_status(pair_id, ("pending", "offered"), "offered")
+                            elif kind == "client_connected" and pair_id in sent_offers:
+                                secret = self.db.consume_relay_pair(pair_id, self.device_id)
+                                if secret:
+                                    cipher = PairCipher(secret, pair_id, "device")
+                                    ciphers[pair_id] = cipher
+                                    seen_actions[pair_id] = set()
+                                    await self._send_encrypted(socket, cipher,
+                                                               {"message_type": "paired", "device_id": self.device_id})
+                            elif kind == "client_disconnected":
+                                ciphers.pop(pair_id, None)
+                                seen_actions.pop(pair_id, None)
+                            elif kind == "ciphertext" and pair_id in ciphers:
+                                try:
+                                    command = ciphers[pair_id].decrypt(payload)
+                                except ValueError:
+                                    continue
+                                await self._handle_action(socket, ciphers[pair_id], command,
+                                                          seen_actions[pair_id])
+                    finally:
+                        offer_task.cancel()
+                        await asyncio.gather(offer_task, return_exceptions=True)
+            except (OSError, ValueError, ConnectionClosed, json.JSONDecodeError):
                 await asyncio.sleep(5)
 
 
@@ -159,17 +289,22 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the gh0st local API")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8383)
-    parser.add_argument("--device-id", default="local")
+    parser.add_argument("--device-id", default=os.getenv("GH0ST_DEVICE_ID", "local"))
+    parser.add_argument("--db-url", default=None)
+    parser.add_argument("--workspace-root", default=None)
     args = parser.parse_args()
     if args.host not in {"127.0.0.1", "localhost", "::1"} and not os.getenv("GH0ST_API_TOKEN"):
         parser.error("Set GH0ST_API_TOKEN before binding beyond loopback")
     relay_url = os.getenv("GH0ST_RELAY_URL", "")
     relay_token = os.getenv("GH0ST_RELAY_TOKEN", "")
+    db = StateLedger(args.db_url)
+    db.init_db()
     if relay_url:
-        client = CloudRelayClient(relay_url, args.device_id, relay_token)
+        client = CloudRelayClient(relay_url, args.device_id, relay_token,
+                                  db, args.workspace_root)
         threading.Thread(target=lambda: asyncio.run(client.run()), daemon=True).start()
     import uvicorn
-    uvicorn.run(create_app(), host=args.host, port=args.port)
+    uvicorn.run(create_app(db, args.workspace_root), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

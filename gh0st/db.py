@@ -154,6 +154,18 @@ class GrantRequestRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class RelayPairRow(Base):
+    __tablename__ = "relay_pairs"
+
+    pair_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(64), index=True)
+    secret: Mapped[str] = mapped_column(Text, nullable=False)
+    relay_url: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class StateLedger:
     """State Ledger Manager for gh0st, providing SQLite persistence for tickets, reports, quotas, and claims."""
 
@@ -554,6 +566,72 @@ class StateLedger:
                 child_ticket_proposals=proposals,
                 completed_at=row.completed_at,
             )
+
+    # --- One-time Relay Pairing ---
+    def create_relay_pair(self, pair_id: str, device_id: str, secret: str,
+                          relay_url: str, ttl_seconds: int = 300) -> None:
+        if ttl_seconds < 1 or ttl_seconds > 300:
+            raise ValueError("Pair offer TTL must be between 1 and 300 seconds")
+        with self.get_session() as session:
+            session.add(RelayPairRow(
+                pair_id=pair_id, device_id=device_id, secret=secret,
+                relay_url=relay_url,
+                expires_at=self._utc_now() + timedelta(seconds=ttl_seconds),
+            ))
+            session.commit()
+
+    def get_relay_pair(self, pair_id: str) -> Optional[dict[str, Any]]:
+        with self.get_session() as session:
+            row = session.get(RelayPairRow, pair_id)
+            if not row:
+                return None
+            return {"pair_id": row.pair_id, "device_id": row.device_id,
+                    "secret": row.secret, "relay_url": row.relay_url,
+                    "status": row.status, "expires_at": row.expires_at}
+
+    def list_live_relay_pairs(self, device_id: str) -> list[dict[str, Any]]:
+        with self.get_session() as session:
+            rows = session.query(RelayPairRow).filter(
+                RelayPairRow.device_id == device_id,
+                RelayPairRow.status.in_(["pending", "offered"]),
+                RelayPairRow.expires_at > self._utc_now(),
+            ).all()
+            return [{"pair_id": row.pair_id, "device_id": row.device_id,
+                     "secret": row.secret, "relay_url": row.relay_url,
+                     "status": row.status, "expires_at": row.expires_at}
+                    for row in rows]
+
+    def set_relay_pair_status(self, pair_id: str, expected: tuple[str, ...], status: str) -> bool:
+        with self.get_session() as session:
+            with session.begin():
+                result = session.execute(update(RelayPairRow).where(
+                    RelayPairRow.pair_id == pair_id,
+                    RelayPairRow.status.in_(expected),
+                    RelayPairRow.expires_at > self._utc_now(),
+                ).values(status=status))
+                return result.rowcount == 1
+
+    def consume_relay_pair(self, pair_id: str, device_id: str) -> Optional[str]:
+        """Consume a one-time secret and erase its persisted copy."""
+        with self.get_session() as session:
+            with session.begin():
+                row = session.get(RelayPairRow, pair_id)
+                if (not row or row.device_id != device_id or
+                        row.status not in {"pending", "offered"} or
+                        row.expires_at <= self._utc_now()):
+                    return None
+                secret = row.secret
+                row.secret = ""
+                row.status = "paired"
+                return secret
+
+    def expire_relay_pairs(self) -> None:
+        with self.get_session() as session:
+            with session.begin():
+                session.execute(update(RelayPairRow).where(
+                    RelayPairRow.status.in_(["pending", "offered"]),
+                    RelayPairRow.expires_at <= self._utc_now(),
+                ).values(status="expired", secret=""))
 
     def save_grant_request(self, grant: GrantRequest) -> GrantRequest:
         with self.get_session() as session:

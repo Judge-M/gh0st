@@ -1,114 +1,90 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "gh0st Mobile Remote Control & Push Protocol",
-  "description": "Event notifications and action command schemas for the gh0st-relay WebSocket reverse tunnel",
-  "definitions": {
-    "EventType": {
-      "type": "string",
-      "enum": [
-        "task_started",
-        "ticket_dispatched",
-        "turn_completed",
-        "quota_warning",
-        "approval_requested",
-        "task_completed",
-        "task_failed"
-      ]
-    },
-    "ActionType": {
-      "type": "string",
-      "enum": [
-        "approve_grant",
-        "reject_grant",
-        "adjust_budget",
-        "pause_task",
-        "cancel_task"
-        ,"dispatch_task"
-      ]
-    },
-    "RelayEventMessage": {
+  "title": "gh0st paired relay protocol",
+  "description": "The broker sees registration frames and opaque ciphertext envelopes. Action and result messages are inside the encrypted envelope.",
+  "$defs": {
+    "ciphertext": {
       "type": "object",
-      "required": ["event_id", "event_type", "task_id", "timestamp", "payload"],
+      "additionalProperties": false,
+      "required": ["message_type", "pair_id", "nonce", "ciphertext"],
       "properties": {
-        "event_id": {
-          "type": "string",
-          "description": "Unique event notification identifier (evt_...)"
-        },
-        "event_type": {
-          "$ref": "#/definitions/EventType"
-        },
-        "device_id": {
-          "type": "string",
-          "description": "Originating gh0st daemon device identifier"
-        },
-        "task_id": {
-          "type": "string",
-          "description": "Root task identifier"
-        },
-        "ticket_id": {
-          "type": "string",
-          "description": "Associated ticket ID (if applicable)"
-        },
-        "timestamp": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "payload": {
-          "type": "object",
-          "properties": {
-            "prompt": { "type": "string" },
-            "capability": { "type": "string" },
-            "confidence_score": { "type": "number" },
-            "remaining_usd": { "type": "number" },
-            "remaining_tokens": { "type": "integer" },
-            "tokens_used": { "type": "integer" },
-            "cost_usd": { "type": "number" },
-            "approval_type": { "type": "string" },
-            "error_message": { "type": "string" }
-          }
-        }
+        "message_type": { "const": "ciphertext" },
+        "pair_id": { "type": "string", "minLength": 20 },
+        "nonce": { "type": "string", "description": "Base64url 12-byte AES-GCM nonce" },
+        "ciphertext": { "type": "string", "description": "Base64url AES-GCM ciphertext and tag" }
       }
     },
-    "RelayActionCommand": {
+    "device_register": {
       "type": "object",
-      "required": ["action_id", "action_type", "task_id", "timestamp"],
+      "additionalProperties": false,
+      "required": ["message_type", "device_id"],
       "properties": {
-        "action_id": {
-          "type": "string",
-          "description": "Unique action command identifier (act_...)"
-        },
+        "message_type": { "const": "device_register" },
+        "device_id": { "type": "string" }
+      }
+    },
+    "pair_offer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_type", "pair_id"],
+      "properties": {
+        "message_type": { "const": "pair_offer" },
+        "pair_id": { "type": "string" }
+      }
+    },
+    "client_register": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_type", "pair_id"],
+      "properties": {
+        "message_type": { "const": "client_register" },
+        "pair_id": { "type": "string" }
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": ["action_id", "action_type"],
+      "properties": {
+        "action_id": { "type": "string", "pattern": "^act_" },
         "action_type": {
-          "$ref": "#/definitions/ActionType"
+          "enum": ["status", "approve_grant", "reject_grant", "dispatch_task"]
         },
-        "task_id": {
-          "type": "string"
-        },
-        "ticket_id": {
-          "type": "string"
-        },
-        "timestamp": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "approval_decision": {
-              "type": "string",
-              "enum": ["approved", "rejected"]
-            },
-            "additional_usd": {
-              "type": "number"
-            },
-            "additional_tokens": {
-              "type": "integer"
-            },
-            "reason": {
-              "type": "string"
-            }
-          }
-        }
+        "task_id": { "type": "string" },
+        "grant_id": { "type": "string" },
+        "prompt": { "type": "string", "minLength": 1, "maxLength": 8000 },
+        "budget_usd": { "type": "number", "exclusiveMinimum": 0 },
+        "budget_tokens": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "action_result": {
+      "type": "object",
+      "required": ["message_type", "action_id", "ok"],
+      "properties": {
+        "message_type": { "const": "action_result" },
+        "action_id": { "type": "string" },
+        "ok": { "type": "boolean" },
+        "result": { "type": "object" },
+        "error": { "type": "string" }
+      }
+    },
+    "task_update": {
+      "type": "object",
+      "required": ["message_type", "task_id", "status"],
+      "properties": {
+        "message_type": { "const": "task_update" },
+        "task_id": { "type": "string" },
+        "status": { "type": "string" },
+        "remaining_tokens": { "type": "integer" },
+        "remaining_usd": { "type": "number" },
+        "grant_requests": { "type": "array", "items": { "type": "object" } },
+        "error": { "type": "string" }
       }
     }
-  }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/ciphertext" },
+    { "$ref": "#/$defs/device_register" },
+    { "$ref": "#/$defs/pair_offer" },
+    { "$ref": "#/$defs/client_register" }
+  ]
 }
