@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import * as Crypto from 'expo-crypto';
+import { Envelope, PairCipher, parsePairingUri } from './relayCrypto';
 import {
   StyleSheet,
   Text,
@@ -8,20 +10,13 @@ import {
   TextInput,
   SafeAreaView,
   StatusBar,
-  ActivityIndicator,
   Alert,
   Platform
 } from 'react-native';
 
-/**
- * gh0st Mobile Remote Control Client (iOS & Android)
- * Connects to a configured relay endpoint when a broker is available.
- */
-
-const RELAY_ENDPOINT = process.env.EXPO_PUBLIC_GH0ST_RELAY_URL || '';
-
 export default function Gh0stMobileApp() {
-  const [deviceId, setDeviceId] = useState('dev_mobile_client');
+  const [pairingUri, setPairingUri] = useState('');
+  const [taskId, setTaskId] = useState('');
   const [isConnected, setIsConnected] = useState(false);
   const [isPaired, setIsPaired] = useState(false);
   const [pairingStatus, setPairingStatus] = useState('Disconnected');
@@ -31,108 +26,109 @@ export default function Gh0stMobileApp() {
   const [quotaStats, setQuotaStats] = useState<{remainingUsd: number | null; remainingTokens: number | null}>({ remainingUsd: null, remainingTokens: null });
 
   const ws = useRef<WebSocket | null>(null);
+  const cipher = useRef<PairCipher | null>(null);
 
   useEffect(() => {
-    connectToRelay();
-    return () => {
-      ws.current?.close();
-    };
+    return () => { ws.current?.close(); };
   }, []);
 
   const connectToRelay = () => {
-    if (!RELAY_ENDPOINT.startsWith('wss://')) {
-      setPairingStatus('Set EXPO_PUBLIC_GH0ST_RELAY_URL');
-      return;
-    }
-    setPairingStatus('Connecting...');
     try {
-      const socket = new WebSocket(RELAY_ENDPOINT);
+      const pairing = parsePairingUri(pairingUri);
+      const channel = new PairCipher(pairing, 'client');
+      ws.current?.close();
+      cipher.current = channel;
+      setPairingUri('');
+      setIsPaired(false);
+      setPairingStatus('Connecting...');
+      const socket = new WebSocket(pairing.relay);
 
       socket.onopen = () => {
+        if (ws.current !== socket) return;
         setIsConnected(true);
-        setPairingStatus('Connected; waiting for pairing');
-        // Send registration handshake
-        socket.send(JSON.stringify({
-          message_type: 'client_register',
-          device_id: deviceId,
-          timestamp: new Date().toISOString()
-        }));
+        setPairingStatus('Connected; verifying pairing');
+        socket.send(JSON.stringify({ message_type: 'client_register', pair_id: pairing.pair }));
       };
 
       socket.onmessage = (event) => {
+        if (ws.current !== socket) return;
         try {
           const data = JSON.parse(event.data);
-          handleIncomingEvent(data);
+          if (data.message_type === 'transport_connected') return;
+          if (data.message_type !== 'ciphertext') return;
+          const decrypted = channel.decrypt(data as Envelope);
+          if (decrypted.message_type === 'paired') {
+            setIsPaired(true);
+            setPairingStatus(`Paired with ${pairing.device}`);
+          } else {
+            handleIncomingEvent(decrypted);
+          }
         } catch (e) {
-          console.error('Failed to parse WebSocket message:', e);
+          setPairingStatus('Invalid encrypted message');
         }
       };
 
-      socket.onerror = (error) => {
+      socket.onerror = () => {
+        if (ws.current !== socket) return;
         setPairingStatus('Connection Error');
         setIsConnected(false);
       };
 
       socket.onclose = () => {
+        if (ws.current !== socket) return;
         setIsConnected(false);
         setIsPaired(false);
-        setPairingStatus('Disconnected (Reconnecting in 5s...)');
-        setTimeout(connectToRelay, 5000);
+        cipher.current = null;
+        setPairingStatus('Disconnected; create a new pairing to reconnect');
       };
 
       ws.current = socket;
     } catch (err) {
-      setPairingStatus('Failed to connect');
+      setPairingStatus(err instanceof Error ? err.message : 'Invalid pairing URI');
     }
   };
 
   const handleIncomingEvent = (data: any) => {
-    if (data.message_type === 'paired') {
-      setIsPaired(true);
-      setPairingStatus('Paired');
-    }
     setEvents((prev) => [data, ...prev.slice(0, 49)]);
-
-    if (data.event_type === 'approval_requested') {
-      setPendingApprovals((prev) => [...prev, data.payload]);
-    } else if (data.event_type === 'quota_warning') {
+    if (data.message_type === 'action_result' && !data.ok) {
+      Alert.alert('Request failed', data.error || 'Unknown error');
+    }
+    const snapshot = data.message_type === 'action_result' ? data.result : data;
+    if (snapshot && typeof snapshot === 'object') {
+      if (snapshot.task_id) setTaskId(snapshot.task_id);
+      if (Array.isArray(snapshot.grant_requests)) {
+        setPendingApprovals(snapshot.grant_requests.filter((grant: any) => grant.status === 'pending'));
+      }
       setQuotaStats((prev) => ({
-        ...prev,
-        remainingUsd: data.payload.remaining_usd ?? prev.remainingUsd,
-        remainingTokens: data.payload.remaining_tokens ?? prev.remainingTokens
+        remainingUsd: snapshot.remaining_usd ?? prev.remainingUsd,
+        remainingTokens: snapshot.remaining_tokens ?? prev.remainingTokens,
       }));
     }
   };
 
-  const sendRemoteAction = (action: string, ticketId?: string, payload: any = {}) => {
-    if (!isPaired || !ws.current || ws.current.readyState !== WebSocket.OPEN) {
-      Alert.alert('Error', 'Pair this device with a gh0st relay first');
+  const sendRemoteAction = async (action: string, payload: Record<string, unknown> = {}) => {
+    const socket = ws.current;
+    const channel = cipher.current;
+    if (!isPaired || !socket || !channel || socket.readyState !== WebSocket.OPEN) {
+      Alert.alert('Error', 'Pair this device with a gh0st instance first');
       return;
     }
-
-    const command = {
-      message_type: 'action_command',
-      action_id: `act_${Date.now()}`,
-      action_type: action,
-      task_id: payload.task_id || 'new',
-      ticket_id: ticketId,
-      parameters: payload,
-      timestamp: new Date().toISOString()
-    };
-
-    ws.current.send(JSON.stringify(command));
-
-    if (action === 'approve_grant' || action === 'reject_grant') {
-      setPendingApprovals((prev) => prev.filter((item) => item.ticket_id !== ticketId));
+    try {
+      const random = await Crypto.getRandomBytesAsync(8);
+      const actionId = `act_${Array.from(random).map(value => value.toString(16).padStart(2, '0')).join('')}`;
+      const command = { action_id: actionId, action_type: action, ...payload };
+      const envelope = await channel.encrypt(command, Crypto.getRandomBytesAsync);
+      if (socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify(envelope));
+    } catch (error) {
+      Alert.alert('Request failed', error instanceof Error ? error.message : 'Could not encrypt request');
     }
   };
 
   const dispatchNewTask = () => {
     if (!prompt.trim()) return;
-
-    sendRemoteAction('dispatch_task', undefined, { prompt: prompt.trim() });
+    void sendRemoteAction('dispatch_task', { prompt: prompt.trim() });
     setPrompt('');
-    Alert.alert('Request sent', 'Waiting for confirmation from the paired instance.');
   };
 
   return (
@@ -154,6 +150,40 @@ export default function Gh0stMobileApp() {
 
       {/* Main Controls & Event Feed */}
       <ScrollView style={styles.scrollContent} contentContainerStyle={{ paddingBottom: 30 }}>
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Pair this device</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="Paste the one-time gh0st://pair URI"
+            placeholderTextColor="#64748b"
+            value={pairingUri}
+            onChangeText={setPairingUri}
+            autoCapitalize="none"
+            autoCorrect={false}
+            multiline
+          />
+          <TouchableOpacity style={styles.primaryBtn} onPress={connectToRelay}>
+            <Text style={styles.primaryBtnText}>Connect securely</Text>
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>Task status</Text>
+          <TextInput
+            style={styles.input}
+            placeholder="Task ID"
+            placeholderTextColor="#64748b"
+            value={taskId}
+            onChangeText={setTaskId}
+            autoCapitalize="none"
+          />
+          <TouchableOpacity style={styles.primaryBtn}
+            onPress={() => void sendRemoteAction('status', { task_id: taskId.trim() })}
+            disabled={!isPaired || !taskId.trim()}>
+            <Text style={styles.primaryBtnText}>Refresh status and grants</Text>
+          </TouchableOpacity>
+        </View>
 
         {/* Quota & Health Widget */}
         <View style={styles.card}>
@@ -179,17 +209,19 @@ export default function Gh0stMobileApp() {
                 <Text style={styles.approvalText}>
                   Ticket <Text style={styles.bold}>{approval.ticket_id}</Text> requires tool grant:
                 </Text>
-                <Text style={styles.codeText}>{approval.tool_name || 'Budget Expansion'}</Text>
+                <Text style={styles.codeText}>{approval.action_type}: {JSON.stringify(approval.details)}</Text>
                 <View style={styles.buttonRow}>
                   <TouchableOpacity
                     style={[styles.btn, styles.btnSuccess]}
-                    onPress={() => sendRemoteAction('approve_grant', approval.ticket_id)}
+                    onPress={() => void sendRemoteAction('approve_grant',
+                      { task_id: approval.task_id, grant_id: approval.grant_id })}
                   >
                     <Text style={styles.btnText}>Approve</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
                     style={[styles.btn, styles.btnDanger]}
-                    onPress={() => sendRemoteAction('reject_grant', approval.ticket_id)}
+                    onPress={() => void sendRemoteAction('reject_grant',
+                      { task_id: approval.task_id, grant_id: approval.grant_id })}
                   >
                     <Text style={styles.btnText}>Reject</Text>
                   </TouchableOpacity>
@@ -224,7 +256,7 @@ export default function Gh0stMobileApp() {
             events.map((evt, idx) => (
               <View key={idx} style={styles.eventItem}>
                 <View style={styles.eventHeader}>
-                  <Text style={styles.eventType}>{evt.event_type || 'system_event'}</Text>
+                  <Text style={styles.eventType}>{evt.message_type || evt.event_type || 'system_event'}</Text>
                   <Text style={styles.eventTime}>
                     {evt.timestamp ? new Date(evt.timestamp).toLocaleTimeString() : ''}
                   </Text>

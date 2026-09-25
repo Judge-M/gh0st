@@ -1,0 +1,18 @@
+{
+  "pairing": {
+    "relay": "wss://relay.example.test",
+    "device": "fixture",
+    "pair": "pair_interop_fixture_1234567890",
+    "secret": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8"
+  },
+  "payload": {
+    "action": "status",
+    "task_id": "task_one"
+  },
+  "envelope": {
+    "message_type": "ciphertext",
+    "pair_id": "pair_interop_fixture_1234567890",
+    "nonce": "AAECAwQFBgcICQoL",
+    "ciphertext": "DgszMcB2IU2DHqmRrBArYoEaYFAS8d_hZ6KKddnmdBxJ0JLlP8nxXuDcQxQ28xdX2EGJjYnKD4U"
+  }
+}

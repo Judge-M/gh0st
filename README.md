@@ -15,13 +15,15 @@ An ephemeral, task-scoped runtime with local routing, a SQLite state ledger, and
 - The worker can iterate through edits and tests, then records commands, test results, a diff, unresolved failures, usage, and a final status. A gateway `402` or `429` halts the ticket.
 - Running tickets hold a five-minute claim lease renewed by the worker. A dead child is halted immediately; after an unobserved controller crash, `gh0st resume TASK_ID` recovers an expired claim. Recovery records a halted report and never replays the worker automatically.
 - External pushes, production writes, and non-gateway network actions are grant requests in the ledger. An operator can approve or reject a request locally; this release does not execute external actions after approval.
-- The CLI, loopback API, basic browser dashboard, and VS Code command extension provide local control. The mobile and relay code are prototypes; a broker, remote pairing, remote command authentication, push delivery, and a packaged Tauri app are not included.
+- A self-hosted WebSocket broker routes opaque encrypted frames. One-time pairing URIs carry a 256-bit secret that stays on the daemon and mobile client. Paired clients can read task status, submit bounded task requests, and record grant decisions; the broker does not see those payloads. Pairings expire after five minutes and are not reused after a disconnect.
+- The CLI, loopback API, basic browser dashboard, VS Code command extension, and mobile client provide control surfaces. OS push delivery, a hosted broker deployment, persistent multi-device pairing, and a packaged Tauri app are not yet included.
 
 ## Requirements
 
 - Linux with Python 3.12+, Git, and `bubblewrap` (`bwrap`) available on `PATH` for local action execution
 - A configured OpenAI-compatible `/chat/completions` gateway, such as LiteLLM Proxy or OpenRouter
 - A gateway response with `usage.total_tokens` and `usage.cost_usd` (or top-level `cost_usd`) for every completion
+- `cryptography` for encrypted relay pairing; the mobile client uses `@noble/ciphers` and `@noble/hashes`
 
 ```bash
 python -m pip install -e .
@@ -53,9 +55,25 @@ gh0st status task_id_from_previous_command
 gh0st resume task_id_from_previous_command
 gh0st grant grant_id --approve --operator "Matthew Judge"
 gh0st api --host 127.0.0.1 --port 8383
+gh0st pair --relay-url wss://relay.example.com --device-id my-linux
 ```
 
 The `grant` command records an operator decision. It does not launch a remote push, production write, or other external action. Local `git commit` checkpoints within the task clone are permitted when the clone has a configured author identity.
+
+## Self-hosted relay
+
+Create a `devices.json` file containing a device ID and a long random token, for example `{"my-linux":"<random-token-of-at-least-32-characters>"}`. Keep that file private. Start `gh0st-broker --devices devices.json` on loopback behind a TLS reverse proxy, or provide `--cert` and `--key` when binding it to an external interface. The daemon always initiates the outbound connection:
+
+```bash
+export GH0ST_RELAY_URL=wss://relay.example.com
+export GH0ST_RELAY_TOKEN=<same-token-as-devices.json>
+export GH0ST_DEVICE_ID=my-linux
+export GH0ST_RELAY_SOURCE_REPO=/path/to/approved/repo
+gh0st-relay --device-id my-linux
+gh0st pair --relay-url "$GH0ST_RELAY_URL" --device-id my-linux
+```
+
+The last command prints a one-time `gh0st://pair?...` URI. Paste it into the mobile pairing field while the daemon is connected. The URI contains the end-to-end secret; do not give it to the broker. A paired session supports encrypted status reads, bounded task dispatch, and grant approval or rejection. Remote dispatch uses only `GH0ST_RELAY_SOURCE_REPO` as its source repository; without it, remote requests create scratch tasks. `GH0ST_RELAY_MAX_BUDGET_USD` and `GH0ST_RELAY_MAX_TOKENS` cap remote requests (defaults: $5 and 100,000 tokens). Broker offers live in memory only, and a disconnected client needs a new pairing URI. Grant decisions are ledger records; they do not execute the external action.
 
 The browser dashboard is at `http://127.0.0.1:8383/ui`. The API is intended for loopback use. Set `GH0ST_API_TOKEN` to require a bearer token; clients then send `Authorization: Bearer <token>`. The dashboard currently assumes the default port and does not provide a token entry field, so use the CLI or an authenticated API client when token protection or a custom port is enabled.
 
@@ -79,10 +97,12 @@ If a worker exits without a report, its gateway usage cannot be verified. Recove
 python -m pip install -e . pytest
 python -m pytest -q
 python -m benchmarks.admission
+cd interfaces/mobile && pnpm install && pnpm typecheck && pnpm test:crypto
 ```
 
 The Linux tests require `bwrap` and exercise an edit–test–report loop, out-of-workspace write rejection, non-gateway network rejection, and protection of the source checkout. Other tests cover model selection, quota reservation, duplicate claims, ledger reporting, grants, and API behavior.
 The admission benchmark measures the warm SQLite quota read and budget comparison on Linux. It exits nonzero if p95 latency across 1,000 samples is at least 1 ms. Use `--directory` to place its temporary database on the release filesystem. The durable ticket reservation transaction is separate from that preflight measurement.
+The relay tests start a broker on loopback and verify authenticated pairing, encrypted task/status/grant messages, secret removal after pairing, and a shared Python/mobile encryption vector. A physical iOS/Android device and production TLS deployment remain separate validation gates.
 
 ## License
 
