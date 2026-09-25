@@ -13,10 +13,19 @@
   button { background: #576ded; color: white; border: 0; border-radius: 6px; padding: .7rem 1rem; margin-top: .6rem; cursor: pointer; }
   dt { color: #aebcd0; } dd { margin: 0 0 .7rem; font-weight: 600; }
   #message { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .auth { display: flex; gap: .6rem; align-items: end; margin-bottom: 1rem; }
+  .auth label { flex: 1; }
+  .auth button { margin: 0; }
   @media(max-width: 680px) { main { grid-template-columns: 1fr; } }
 </style>
 <h1>gh0st Control</h1>
 <p id="health">Checking local daemon…</p>
+<section class="auth">
+  <label for="api-token">Local API token (optional)
+    <input id="api-token" type="password" autocomplete="off" placeholder="Held in memory for this tab only">
+  </label>
+  <button id="connect">Connect</button>
+</section>
 <main>
   <section>
     <h2>New task</h2>
@@ -31,11 +40,14 @@
   </section>
 </main>
 <script>
-const api = 'http://127.0.0.1:8383';
+const api = window.location.origin;
+let apiToken = '';
 let taskId = null;
 let poller = null;
 async function request(path, options) {
-  const response = await fetch(api + path, options);
+  const requestOptions = {...options, headers: {...(options?.headers || {})}};
+  if (apiToken) requestOptions.headers.Authorization = `Bearer ${apiToken}`;
+  const response = await fetch(api + path, requestOptions);
   const data = await response.json();
   if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
   return data;
@@ -63,6 +75,20 @@ document.getElementById('dispatch').addEventListener('click', async () => {
     refresh();
   } catch (error) { document.getElementById('message').textContent = error.message; }
 });
-request('/v1/health').then(() => document.getElementById('health').textContent = 'Local daemon connected').catch(() => document.getElementById('health').textContent = 'Start gh0st api on port 8383');
+async function connect() {
+  apiToken = document.getElementById('api-token').value.trim();
+  try {
+    await request('/v1/health');
+    document.getElementById('health').textContent = 'Local daemon connected';
+    document.getElementById('message').textContent = '';
+  } catch (error) {
+    apiToken = '';
+    document.getElementById('health').textContent = 'Could not connect to the local daemon';
+    document.getElementById('message').textContent = error.message;
+  }
+}
+document.getElementById('connect').addEventListener('click', connect);
+document.getElementById('api-token').addEventListener('keydown', event => { if (event.key === 'Enter') connect(); });
+connect();
 </script>
 </html>
