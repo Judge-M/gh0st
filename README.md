@@ -17,7 +17,7 @@ An ephemeral, task-scoped execution SDK and CLI with local routing, an SQLite st
 - Running tickets hold a five-minute claim lease renewed by the worker. A dead child is halted immediately; after an unobserved controller crash, `gh0st resume TASK_ID` recovers an expired claim. Recovery records a halted report and never replays the worker automatically.
 - External pushes, production writes, and non-gateway network actions are grant requests in the ledger. An operator can approve or reject a request locally; external actions remain gated.
 - A self-hosted WebSocket broker routes opaque encrypted frames. One-time pairing URIs carry a 256-bit secret that stays on the daemon and mobile client. Paired clients can read task status, submit bounded task requests, and record grant decisions; the broker does not see those payloads. Pair offers expire after five minutes. Paired phones reconnect using a credential in OS secure storage; operators can list and revoke pairings locally.
-- The CLI, loopback API, browser dashboard, VS Code extension, Tauri desktop app, and mobile pairing client provide control surfaces. Remaining release work includes OS push delivery, a hosted broker deployment, physical mobile reconnect/revocation validation, and publishing signed desktop/mobile packages.
+- The CLI, loopback API, browser dashboard, VS Code extension, Tauri desktop app, and mobile pairing client provide control surfaces. Remaining release work includes image input/generation transport, OS push delivery, a hosted broker deployment, physical mobile reconnect/revocation validation, and publishing signed desktop/mobile packages.
 
 ## Requirements
 
@@ -145,6 +145,7 @@ cd interfaces/tauri && pnpm install && pnpm build
 ```
 
 The Linux tests require `bwrap` and exercise an edit–test–report loop, out-of-workspace write rejection, non-gateway network rejection, and protection of the source checkout. Other tests cover model selection, quota reservation, duplicate claims, ledger reporting, grants, and API behavior.
+The Linux release workflow in `.github/workflows/linux-release-gates.yml` runs the integration tests, the 1 ms quota and 100 ms router latency benchmarks, and an SDK wheel build on pushes and pull requests targeting `main`.
 The admission benchmark measures the warm SQLite quota read and budget comparison on Linux. It exits nonzero if p95 latency across 1,000 samples is at least 1 ms. Use `--directory` to place its temporary database on the release filesystem. The durable ticket reservation transaction is separate from that preflight measurement. The routing benchmark measures the local Layla classifier interface and exits nonzero if p95 latency is at least 100 ms; it does not include model catalog selection or ledger writes.
 The relay tests start a broker on loopback and verify authenticated pairing, encrypted task/status/grant messages, secret removal after pairing, and a shared Python/mobile encryption vector. A physical iOS/Android device and production TLS deployment remain separate validation gates.
 
