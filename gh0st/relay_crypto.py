@@ -34,7 +34,9 @@ def new_pairing(relay_url: str, device_id: str) -> tuple[str, str, str]:
     """Return (pair_id, secret, QR URI); share the URI only with the operator."""
     if not relay_url.startswith("wss://") and not relay_url.startswith("ws://127.0.0.1:"):
         raise ValueError("Pairing requires WSS or loopback WS for local tests")
-    pair_id = secrets.token_urlsafe(24)
+    # argparse treats a leading dash in a positional ID as an option. Keep
+    # generated IDs safely usable with `gh0st unpair <pair_id>`.
+    pair_id = f"pair_{secrets.token_urlsafe(24)}"
     secret = _encode(os.urandom(32))
     uri = "gh0st://pair?" + urlencode({"relay": relay_url, "device": device_id,
                                       "pair": pair_id, "secret": secret})

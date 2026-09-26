@@ -95,10 +95,12 @@ def test_pairing_cli_lists_and_revokes_device(tmp_path, monkeypatch, capsys):
     from gh0st.cli import main
 
     monkeypatch.setenv("GH0ST_RELAY_KEY_FILE", str(tmp_path / "relay.key"))
+    monkeypatch.setattr("gh0st.relay_crypto.secrets.token_urlsafe", lambda _: "-" + "x" * 24)
     db_url = f"sqlite:///{(tmp_path / 'cli-pairings.db').as_posix()}"
     db = StateLedger(db_url)
     db.init_db()
     pair_id, secret, _ = new_pairing("ws://127.0.0.1:8765", "dev_test")
+    assert pair_id.startswith("pair_-")
     db.create_relay_pair(pair_id, "dev_test", secret, "ws://127.0.0.1:8765")
     db.consume_relay_pair(pair_id, "dev_test")
 
