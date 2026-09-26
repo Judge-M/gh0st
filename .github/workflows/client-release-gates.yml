@@ -19,6 +19,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -41,3 +43,36 @@ jobs:
         run: pnpm test
       - name: Test VS Code extension control flows
         run: node interfaces/vscode/test/extension.test.js
+
+  linux-desktop-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            file \
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            curl \
+            wget
+      - name: Install pnpm
+        run: npm install --global pnpm@11.19.0
+      - name: Install desktop dependencies
+        working-directory: interfaces/tauri
+        run: pnpm install --frozen-lockfile
+      - name: Build Linux desktop package
+        working-directory: interfaces/tauri
+        run: pnpm exec tauri build --bundles deb
