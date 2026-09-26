@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+.pytest_cache
+.test-build
+build
+dist
+*.egg-info
+node_modules
+secrets
+.env
+.env.*

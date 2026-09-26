@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+COPY pyproject.toml README.md ./
+COPY LICENSE ./
+COPY gh0st ./gh0st
+RUN pip install --no-cache-dir . \
+    && useradd --uid 10001 --system --no-create-home --shell /usr/sbin/nologin gh0st
+
+USER gh0st
+EXPOSE 8765
+ENTRYPOINT ["gh0st-broker"]
+CMD ["--devices", "/run/secrets/devices.json", "--host", "0.0.0.0", "--port", "8765", "--cert", "/run/secrets/tls.crt", "--key", "/run/secrets/tls.key"]

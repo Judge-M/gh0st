@@ -21,6 +21,7 @@ from .models import TicketStatus
 from .sdk import Gh0stClient
 from .workspace import WorkspaceManager
 from .relay_crypto import PairCipher
+from .push import ExpoPushNotifier, valid_expo_push_token
 
 
 class RunRequest(BaseModel):
@@ -30,7 +31,8 @@ class RunRequest(BaseModel):
     max_budget_tokens: int = Field(default=100000, ge=1)
     source_repo: Optional[str] = None
     model: Optional[str] = None
-    modality: Optional[str] = None
+    modality: Optional[Literal["text", "code", "vision", "image"]] = None
+    image_paths: list[str] = Field(default_factory=list, max_length=8)
     routing_strategy: Literal["smart", "cost", "quality", "speed", "local"] = "smart"
 
 
@@ -80,7 +82,8 @@ def create_app(db: Optional[StateLedger] = None,
                                    budget_tokens=request.max_budget_tokens,
                                    source_repo=request.source_repo, model=request.model,
                                    modality=request.modality,
-                                   routing_strategy=request.routing_strategy)
+                                   routing_strategy=request.routing_strategy,
+                                   image_paths=request.image_paths)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         decision, ticket = dispatch.decision, dispatch.ticket
@@ -153,6 +156,8 @@ class CloudRelayClient:
         self.db.init_db()
         self.cli = Gh0stCLI(self.db.db_url, workspace_root)
         self.background_tasks: set[asyncio.Task] = set()
+        self.push_notifier = ExpoPushNotifier()
+        self.push_tokens: dict[str, str] = {}
 
     async def _publish_offers(self, socket, sent: set[str], registered: set[str],
                               revoked_sent: set[str], ciphers: dict[str, PairCipher],
@@ -215,6 +220,15 @@ class CloudRelayClient:
                     f"paired:{self.device_id}:{cipher.pair_id}",
                 )
                 result = {"grant_id": grant.grant_id, "status": grant.status}
+            elif action == "register_push":
+                token = payload.get("token")
+                if not valid_expo_push_token(token):
+                    raise ValueError("Invalid Expo Push token")
+                self.push_tokens[cipher.pair_id] = token
+                result = {"registered": True}
+            elif action == "unregister_push":
+                self.push_tokens.pop(cipher.pair_id, None)
+                result = {"registered": False}
             elif action == "dispatch_task":
                 prompt = str(payload.get("prompt") or "").strip()
                 budget_usd = float(payload.get("budget_usd", 5))
@@ -234,6 +248,15 @@ class CloudRelayClient:
                                                 task_id=task_id, budget_usd=budget_usd,
                                                 budget_tokens=budget_tokens,
                                                 source_repo=source_repo)
+                        grants = self.db.list_grant_requests(task_id)
+                        kind = "grant" if any(grant.status == "pending" for grant in grants) else "complete"
+                        push_token = self.push_tokens.get(cipher.pair_id)
+                        if push_token:
+                            try:
+                                await self.push_notifier.send(push_token, kind)
+                            except Exception:
+                                # Push is an optional best-effort signal, never task authority.
+                                pass
                         await self._send_encrypted(socket, cipher,
                                                    {"message_type": "task_update", **self._task_snapshot(task_id)})
                     except ConnectionClosed:
@@ -300,6 +323,7 @@ class CloudRelayClient:
                             elif kind == "client_disconnected":
                                 ciphers.pop(pair_id, None)
                                 seen_actions.pop(pair_id, None)
+                                self.push_tokens.pop(pair_id, None)
                             elif kind == "ciphertext" and pair_id in ciphers:
                                 try:
                                     command = ciphers[pair_id].decrypt(payload)

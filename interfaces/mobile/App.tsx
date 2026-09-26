@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import * as Crypto from 'expo-crypto';
 import * as SecureStore from 'expo-secure-store';
+import * as Notifications from 'expo-notifications';
+import * as Device from 'expo-device';
+import Constants from 'expo-constants';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Envelope, PairCipher, Pairing, parsePairingUri } from './relayCrypto';
 import {
@@ -18,6 +21,11 @@ import {
 } from 'react-native';
 
 const STORED_PAIRING_KEY = 'gh0st.pairing.v1';
+const STORED_PUSH_TOKEN_KEY = 'gh0st.push-token.v1';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: false, shouldSetBadge: false }),
+});
 
 export default function Gh0stMobileApp() {
   const [pairingUri, setPairingUri] = useState('');
@@ -37,6 +45,7 @@ export default function Gh0stMobileApp() {
   const activePairing = useRef<Pairing | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
+  const activePushToken = useRef<string | null>(null);
   const scanned = useRef(false);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
 
@@ -145,6 +154,8 @@ export default function Gh0stMobileApp() {
   };
 
   const forgetPairing = async () => {
+    if (activePushToken.current) void sendRemoteAction('unregister_push');
+    activePushToken.current = null;
     activePairing.current = null;
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
     ws.current?.close();
@@ -154,7 +165,12 @@ export default function Gh0stMobileApp() {
     setIsPaired(false);
     setHasSavedPairing(false);
     setPairingStatus('Saved pairing removed from this phone');
-    if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(STORED_PAIRING_KEY);
+    if (Platform.OS !== 'web') {
+      await Promise.all([
+        SecureStore.deleteItemAsync(STORED_PAIRING_KEY),
+        SecureStore.deleteItemAsync(STORED_PUSH_TOKEN_KEY),
+      ]);
+    }
   };
 
   useEffect(() => {
@@ -221,6 +237,54 @@ export default function Gh0stMobileApp() {
       Alert.alert('Request failed', error instanceof Error ? error.message : 'Could not encrypt request');
     }
   };
+
+  const registerPushToken = async () => {
+    if (Platform.OS === 'web' || !Device.isDevice) {
+      setPairingStatus('Paired; push alerts need a physical device');
+      return;
+    }
+    try {
+      let permission = await Notifications.getPermissionsAsync();
+      if (!permission.granted && permission.status !== 'granted') {
+        permission = await Notifications.requestPermissionsAsync();
+      }
+      if (!permission.granted && permission.status !== 'granted') {
+        setPairingStatus('Paired; push alerts are disabled');
+        return;
+      }
+      const projectId = Constants.expoConfig?.extra?.eas?.projectId;
+      if (!projectId) {
+        setPairingStatus('Paired; link this app to an Expo project to enable push alerts');
+        return;
+      }
+      await Notifications.setNotificationChannelAsync('default', {
+        name: 'gh0st updates', importance: Notifications.AndroidImportance.DEFAULT,
+      });
+      const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
+      activePushToken.current = token;
+      await SecureStore.setItemAsync(STORED_PUSH_TOKEN_KEY, token);
+      await sendRemoteAction('register_push', { token });
+      setPairingStatus(`Paired with ${activePairing.current?.device}; push alerts enabled`);
+    } catch {
+      setPairingStatus('Paired; push alerts could not be enabled');
+    }
+  };
+
+  const restorePushToken = async () => {
+    if (Platform.OS === 'web') return;
+    try {
+      const token = await SecureStore.getItemAsync(STORED_PUSH_TOKEN_KEY);
+      if (!token) return;
+      activePushToken.current = token;
+      await sendRemoteAction('register_push', { token });
+    } catch {
+      setPairingStatus('Paired; saved push alert registration could not be restored');
+    }
+  };
+
+  useEffect(() => {
+    if (isPaired) void restorePushToken();
+  }, [isPaired]);
 
   const dispatchNewTask = () => {
     if (!prompt.trim()) return;
@@ -292,6 +356,11 @@ export default function Gh0stMobileApp() {
           {hasSavedPairing && (
             <TouchableOpacity style={styles.secondaryBtn} onPress={() => void forgetPairing()}>
               <Text style={styles.primaryBtnText}>Forget saved pairing on this phone</Text>
+            </TouchableOpacity>
+          )}
+          {isPaired && Platform.OS !== 'web' && (
+            <TouchableOpacity style={styles.secondaryBtn} onPress={() => void registerPushToken()}>
+              <Text style={styles.primaryBtnText}>Enable push alerts</Text>
             </TouchableOpacity>
           )}
         </View>

@@ -42,9 +42,9 @@ export GH0ST_DEFAULT_MODEL_QUALITY=frontier
 
 Model identifiers use `provider:model` (for example `anthropic:claude-3-5-sonnet` or `openrouter:deepseek/deepseek-r1`). Provider secrets can come from environment variables, files, HashiCorp Vault, or 1Password Connect. Set `GH0ST_SECRETS_PROVIDER` to `env`, `file`, `vault`, or `onepassword` and configure that resolver's environment. Install `gh0st-core[onepassword]` for the 1Password Connect SDK. `--gateway-url` opts into an OpenAI-compatible gateway; aisuite direct calls are the default.
 
-For multiple targets, set `GH0ST_MODEL_CATALOG` to a JSON array or the path to one. Each target specifies `name`, `gateway_model`, `modalities`, `context_window`, `max_payload_tokens`, `quality` (`basic` or `frontier`), optional `domains`, `cost_rank`, and `placement`. High-complexity work requires a frontier target unless the operator explicitly uses `--model`. The override still has to satisfy modality and context capacity.
+For multiple targets, set `GH0ST_MODEL_CATALOG` to a JSON array or the path to one. Each target specifies `name`, `gateway_model`, `modalities`, `context_window`, `max_payload_tokens`, `quality` (`basic` or `frontier`), optional `domains`, `cost_rank`, and `placement`. Image targets also require `image_generation_cost_usd`. High-complexity work requires a frontier target unless the operator explicitly uses `--model`. The override still has to satisfy modality and context capacity.
 
-Catalog quality and capacity values are operator-maintained configuration; gh0st does not independently evaluate model quality. The selector can filter vision and image targets, but image attachments and image-generation transport are not implemented in the current worker.
+Catalog quality and capacity values are operator-maintained configuration; gh0st does not independently evaluate model quality. Attach local PNG, JPEG, or WebP files with repeatable `--image` flags, the SDK's `image_paths` argument, or the loopback API's `image_paths` field. Files are copied outside the editable clone into a task-scoped input directory and sent as data URLs to the selected vision model or gateway. Image generation is disabled by default; explicitly set `--modality image` (or `modality="image"` in the SDK/API) to opt into a configured image model. Configure an explicit `image_generation_cost_usd` for each image target; without it, gh0st rejects the request before dispatch. Generated PNGs are saved inside the task workspace and included in the report diff.
 
 The SQLite ledger defaults to `~/.gh0st/state.db`; task workspaces default to `~/.gh0st/workspaces`. Use `--db-url` and `--workspace-root` before a CLI subcommand, or set `GH0ST_WORKSPACE_ROOT` for the API. `GH0ST_SANDBOX_RUNTIME` may name a trusted Python environment to mount read-only at `/runtime` for tests and linters. The worker never mounts the source checkout or host home into its local command process.
 
@@ -71,6 +71,7 @@ if job.ticket is not None:
 ```
 
 `dispatch` creates a task-scoped clone and ticket; `execute_turn` runs the bounded worker and returns its report. Advanced integrations can import `EphemeralWorker`, `StateLedger`, `System1Router`, and the secret resolver interfaces directly from `gh0st`.
+For a vision request, pass `image_paths=["/path/to/screenshot.png"]` to `dispatch`; this selects vision routing and copies the input alongside (outside) the editable task clone.
 
 ## Memory and retrieved reference material
 
@@ -86,6 +87,7 @@ Pinecone and Qdrant indexes must support text query embedding; Qdrant also requi
 
 ```bash
 gh0st run "Fix the failing parser test" --source-repo /path/to/repo --budget 3.50 --tokens 50000
+gh0st run "Describe this screenshot" --image ./screen.png
 gh0st run "Fix the failing parser test" --source-repo /path/to/repo --model code-target
 gh0st status task_id_from_previous_command
 gh0st resume task_id_from_previous_command
@@ -99,6 +101,8 @@ The `grant` command records an operator decision. It does not launch a remote pu
 ## Self-hosted relay
 
 Create a `devices.json` file containing a device ID and a long random token, for example `{"my-linux":"<random-token-of-at-least-32-characters>"}`. Keep that file private. Start `gh0st-broker --devices devices.json` on loopback behind a TLS reverse proxy, or provide `--cert` and `--key` when binding it to an external interface. The daemon always initiates the outbound connection:
+
+For a TLS-enabled Docker Compose deployment, see [the relay deployment guide](docs/relay-deployment.md), which covers loopback-only local hosting and a publicly reachable VPS setup.
 
 ```bash
 export GH0ST_RELAY_URL=wss://relay.example.com
@@ -116,6 +120,12 @@ The browser dashboard is at `http://127.0.0.1:8383/ui`. It uses the address and 
 The VS Code extension in `interfaces/vscode` shows recent tasks, their tickets, and pending grant requests in the Explorer. Its Run command clones the active local workspace into a task-scoped workspace. Configure task budgets through `gh0st.maxBudgetUsd` and `gh0st.maxBudgetTokens`. If the local API has a token, use **gh0st: Set Local API Token** to save it in VS Code SecretStorage. Grant context actions record a ledger decision after operator confirmation.
 
 The Tauri desktop app in `interfaces/tauri` uses a Rust bridge restricted to the local daemon on `127.0.0.1`. It lists tasks, shows quota and worker reports, dispatches repository tasks, and records grant decisions. The API token is entered for the current app session and is not saved. The Linux release build has produced Debian and AppImage bundles; rebuild on a Linux machine with the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and Rust installed using `cd interfaces/tauri && pnpm install && pnpm build`.
+
+Mobile preview and production build profiles are configured in `interfaces/mobile/eas.json`. See the [mobile release checklist](docs/mobile-release.md) for EAS commands and the physical-device checks still required before store publication.
+
+The broker container and TLS-enabled Compose deployment are defined in `Dockerfile.broker` and `compose.broker.yaml`; see the [relay deployment guide](docs/relay-deployment.md). CI builds the container and checks its command entry point without publishing an image.
+
+Local and self-hosted Docker Compose relay setups are the current options. A gh0st-managed relay is a planned paid-tier service and is not available yet; it will require account entitlements and automatic device credential provisioning while preserving the end-to-end encrypted relay protocol.
 
 ```bash
 curl -X POST http://127.0.0.1:8383/v1/run \
@@ -145,6 +155,7 @@ cd interfaces/tauri && pnpm install && pnpm build
 ```
 
 The Linux tests require `bwrap` and exercise an edit–test–report loop, out-of-workspace write rejection, non-gateway network rejection, and protection of the source checkout. Other tests cover model selection, quota reservation, duplicate claims, ledger reporting, grants, and API behavior.
+The Linux release workflow in `.github/workflows/linux-release-gates.yml` runs the integration tests, the 1 ms quota and 100 ms router latency benchmarks, and an SDK wheel build on pushes and pull requests targeting `main`.
 The admission benchmark measures the warm SQLite quota read and budget comparison on Linux. It exits nonzero if p95 latency across 1,000 samples is at least 1 ms. Use `--directory` to place its temporary database on the release filesystem. The durable ticket reservation transaction is separate from that preflight measurement. The routing benchmark measures the local Layla classifier interface and exits nonzero if p95 latency is at least 100 ms; it does not include model catalog selection or ledger writes.
 The relay tests start a broker on loopback and verify authenticated pairing, encrypted task/status/grant messages, secret removal after pairing, and a shared Python/mobile encryption vector. A physical iOS/Android device and production TLS deployment remain separate validation gates.
 

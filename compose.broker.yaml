@@ -1,0 +1,19 @@
+services:
+  gh0st-broker:
+    build:
+      context: .
+      dockerfile: Dockerfile.broker
+    restart: unless-stopped
+    ports:
+      - "${GH0ST_RELAY_BIND_ADDRESS:-127.0.0.1}:8765:8765"
+    volumes:
+      - ./secrets/devices.json:/run/secrets/devices.json:ro
+      - ./secrets/tls.crt:/run/secrets/tls.crt:ro
+      - ./secrets/tls.key:/run/secrets/tls.key:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

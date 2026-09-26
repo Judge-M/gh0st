@@ -1,0 +1,100 @@
+name: Client release gates
+
+on:
+  push:
+    branches: [main, "milestone*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-release-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clients:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Install pnpm
+        run: npm install --global pnpm@11.19.0
+      - name: Install mobile dependencies
+        working-directory: interfaces/mobile
+        run: pnpm install --frozen-lockfile
+      - name: Validate Expo and EAS build configuration
+        working-directory: interfaces/mobile
+        run: |
+          node -e "const config = require('./eas.json'); if (!config.build.preview || !config.build.production) process.exit(1)"
+          node node_modules/expo/bin/cli config --type public --json > /tmp/gh0st-expo-config.json
+          node -e "const config = require('/tmp/gh0st-expo-config.json'); if (config.ios.bundleIdentifier !== 'org.cyberexperts.gh0st' || config.android.package !== 'org.cyberexperts.gh0st') process.exit(1)"
+      - name: Type-check mobile app
+        working-directory: interfaces/mobile
+        run: pnpm typecheck
+      - name: Test mobile pairing encryption
+        working-directory: interfaces/mobile
+        run: pnpm test:crypto
+      - name: Install desktop dependencies
+        working-directory: interfaces/tauri
+        run: pnpm install --frozen-lockfile
+      - name: Test desktop control flows
+        working-directory: interfaces/tauri
+        run: pnpm test
+      - name: Test VS Code extension control flows
+        run: node interfaces/vscode/test/extension.test.js
+
+  linux-desktop-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Tauri Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            file \
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            curl \
+            wget
+      - name: Install pnpm
+        run: npm install --global pnpm@11.19.0
+      - name: Install desktop dependencies
+        working-directory: interfaces/tauri
+        run: pnpm install --frozen-lockfile
+      - name: Build Linux desktop package
+        working-directory: interfaces/tauri
+        run: pnpm exec tauri build --bundles deb
+
+  broker-container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Verify local and VPS Compose bind addresses
+        run: |
+          docker compose -f compose.broker.yaml config --format json | jq -e '.services["gh0st-broker"].ports[0].host_ip == "127.0.0.1"'
+          GH0ST_RELAY_BIND_ADDRESS=0.0.0.0 docker compose -f compose.broker.yaml config --format json | jq -e '.services["gh0st-broker"].ports[0].host_ip == "0.0.0.0"'
+      - name: Build broker image
+        run: docker build --file Dockerfile.broker --tag gh0st-broker:ci .
+      - name: Check broker entry point
+        run: docker run --rm gh0st-broker:ci --help

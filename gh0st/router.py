@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from .catalog import ModelCatalog
 from .db import StateLedger
 from .models import ComputePlacement, ExecutionTier, System1Decision, Ticket, ToolSchema
+from .workspace import MAX_IMAGE_COUNT
 
 
 class CapabilityTemplate(BaseModel):
@@ -47,6 +48,14 @@ class TemplateRegistry:
                 }, "required": ["capability", "objective"], "additionalProperties": False},
             }}, "required": ["child_proposals"], "additionalProperties": False},
         )
+        image_generator = ToolSchema(
+            name="generate_image",
+            description="Generate one image and save it as an artifact in this isolated task workspace",
+            parameters={"type": "object", "properties": {
+                "prompt": {"type": "string", "minLength": 1, "maxLength": 4000},
+                "filename": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}\\.png$"},
+            }, "required": ["prompt", "filename"], "additionalProperties": False},
+        )
         for name, description, keywords, tier, tool in (
             ("git_ops", "Repository operations", ["git", "commit", "push", "branch", "diff", "checkout"], ExecutionTier.LOW_COMPLEXITY, workbench),
             ("code_refactor", "Code analysis and edits", ["refactor", "rewrite", "fix", "bug", "optimize", "architecture", "code"], ExecutionTier.HIGH_COMPLEXITY, workbench),
@@ -58,6 +67,13 @@ class TemplateRegistry:
                 default_tier=tier,
                 default_tool_schema=tool,
             ))
+        self.register(CapabilityTemplate(
+            capability_name="image_generation",
+            description="Generate an image artifact from a prompt",
+            keywords=["generate", "create", "draw", "illustrate", "image", "picture", "artwork"],
+            default_tier=ExecutionTier.LOW_COMPLEXITY,
+            default_tool_schema=image_generator,
+        ))
 
     def register(self, template: CapabilityTemplate) -> None:
         self._templates[template.capability_name] = template
@@ -82,7 +98,7 @@ class LaylaClassifier(System1Classifier):
         value = prompt.casefold()
         ranked: list[tuple[int, str]] = []
         for template in templates:
-            if template.capability_name == "planner":
+            if template.capability_name in {"planner", "image_generation"}:
                 continue
             count = sum(bool(re.search(r"\b" + re.escape(word.casefold()) + r"\b", value)) for word in template.keywords)
             ranked.append((count, template.capability_name))
@@ -165,7 +181,9 @@ class System1Router:
         if not workspace_path:
             raise ValueError("A task-scoped workspace is required")
 
-        if capability is None:
+        if modality == "image":
+            matched, confidence = "image_generation", 0.98
+        elif capability is None:
             try:
                 matched, confidence = self.classifier.classify(prompt, self.registry.list_all())
             except (httpx.HTTPError, ValueError, KeyError):
@@ -181,7 +199,19 @@ class System1Router:
         selected_modality = modality or ("code" if matched in {"code_refactor", "unit_testing", "git_ops"} else "text")
         selected_strategy = routing_strategy or os.getenv("GH0ST_ROUTING_STRATEGY", "smart")
         context = context_slice or {}
-        payload_tokens = int(len(tiktoken.get_encoding("cl100k_base").encode(json.dumps({"prompt": prompt, "context": context}))) * 1.2) + 128
+        image_inputs = context.get("image_inputs", [])
+        if (not isinstance(image_inputs, list) or len(image_inputs) > MAX_IMAGE_COUNT
+                or any(not isinstance(item, dict) for item in image_inputs)):
+            return self._halt(prompt, "Ticket image inputs must contain at most eight valid records"), None
+        image_token_reserve = 0
+        for item in image_inputs:
+            reserve = item.get("reserved_tokens")
+            if not isinstance(reserve, int) or reserve < 1:
+                return self._halt(prompt, "Ticket image input has no valid token reservation"), None
+            image_token_reserve += reserve
+        payload_tokens = (int(len(tiktoken.get_encoding("cl100k_base").encode(
+            json.dumps({"prompt": prompt, "context": context}))) * 1.2) + 128
+            + image_token_reserve)
         remaining_tokens = min(quota.remaining_tokens, template.default_max_tokens)
         remaining_usd = min(quota.remaining_usd, template.default_max_cost_usd)
         if remaining_tokens <= 0 or remaining_usd <= 0:
@@ -190,12 +220,16 @@ class System1Router:
             target = self.catalog.select(selected_modality, payload_tokens,
                                          min(remaining_tokens, 1024), matched, tier, model_override,
                                          selected_strategy)
+            if selected_modality == "image" and target.image_generation_cost_usd is None:
+                raise ValueError("Image model selection requires an explicit image_generation_cost_usd catalog price")
             fallback_targets = self.catalog.resolve_fallbacks(target)
         except ValueError as exc:
             return self._halt(prompt, str(exc)), None
         ticket = Ticket(
             task_id=task_id, parent_ticket_id=parent_ticket_id, depth=depth,
-            capability=matched, objective=prompt, context_slice=context,
+            capability=matched, objective=prompt,
+            context_slice=({**context, "allow_image_generation": True}
+                           if matched == "image_generation" else context),
             workspace_path=workspace_path, source_commit=source_commit,
             permitted_local_capabilities=["local_shell"],
             gateway_allowance={"enabled": True, "model": target.gateway_model,
@@ -208,7 +242,8 @@ class System1Router:
                                } for item in fallback_targets},
                                "pricing_model": target.pricing_model,
                                "input_cost_per_million_usd": target.input_cost_per_million_usd,
-                               "output_cost_per_million_usd": target.output_cost_per_million_usd},
+                               "output_cost_per_million_usd": target.output_cost_per_million_usd,
+                               "image_generation_cost_usd": target.image_generation_cost_usd},
             assigned_model=target.gateway_model,
             routing_strategy=selected_strategy,
             attached_tool_schema=template.default_tool_schema,
