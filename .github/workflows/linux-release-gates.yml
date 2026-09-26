@@ -37,32 +37,7 @@ jobs:
       - name: Install bubblewrap
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap python3-venv util-linux
-      - name: Configure bubblewrap for the hosted runner
-        run: |
-          wrapper_dir="$RUNNER_TEMP/gh0st-bin"
-          mkdir -p "$wrapper_dir"
-          cat > "$wrapper_dir/bwrap" <<'EOF'
-          #!/bin/bash
-          set -euo pipefail
-          found_netns=0
-          args=()
-          for arg in "$@"; do
-            if [[ "$arg" == "--unshare-net" ]]; then
-              found_netns=1
-            else
-              args+=("$arg")
-            fi
-          done
-          if [[ "$found_netns" != 1 ]]; then
-            echo "bubblewrap command did not request network isolation" >&2
-            exit 2
-          fi
-          exec /usr/bin/unshare --user --map-current-user --net --fork \
-            /usr/bin/bwrap "${args[@]}"
-          EOF
-          chmod +x "$wrapper_dir/bwrap"
-          echo "$wrapper_dir" >> "$GITHUB_PATH"
+          sudo apt-get install --yes bubblewrap python3-venv
       - name: Install project and test dependencies
         run: |
           /usr/bin/python3 -m venv --copies .venv
@@ -71,7 +46,9 @@ jobs:
       - name: Run Linux integration tests
         env:
           GH0ST_SANDBOX_RUNTIME: ${{ github.workspace }}/.venv
-        run: .venv/bin/python -m pytest -q
+        # GitHub's hosted VM denies loopback setup from the runner UID. Root-owned test
+        # workspaces match bubblewrap's namespace mapping; gh0st drops worker capabilities.
+        run: sudo -n -- env GH0ST_SANDBOX_RUNTIME="$GH0ST_SANDBOX_RUNTIME" "$GITHUB_WORKSPACE/.venv/bin/python" -m pytest -q
       - name: Check admission and router latency
         run: |
           .venv/bin/python -m benchmarks.admission --directory /tmp
