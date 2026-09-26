@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/gh0st-hero.png" alt="Luminous ghost agent waking from a model routing gateway, running an iterative loop, and dissolving into its report" width="100%">
+  <img src="docs/gh0st-hero.png" alt="Gh0st signal routed through a gateway into an ephemeral worker loop and report" width="100%">
 </p>
 
 <p align="center">
@@ -11,7 +11,7 @@
 
 <p align="center">
   <strong>An AI gateway built around ephemeral agents.</strong><br>
-  System-1 routes every turn. A fresh ghost does the work, reports back, and exits.
+  One OAG decision tree routes the model, tool, and memory. A fresh ghost acts, reports, and exits.
 </p>
 
 <p align="center">
@@ -26,28 +26,28 @@
 
 ## 👻 Meet gh0st
 
-**gh0st is an SDK and AI gateway for ephemeral agents.** System-1 classifies each turn, chooses a model and one relevant tool schema, and dispatches a ticket to a short-lived worker: a ghost. The ghost acts, checks its work, returns a report, and exits. A new worker and model conversation are built for the next ticket, so hidden agent state does not accumulate between turns. The REPL can pass a bounded slice of recent chat history when continuity helps.
+**gh0st is an SDK and AI gateway for ephemeral agents.** Its System-1 router uses **Ontological Augmented Generation (OAG)**: after task classification, one ontology-based decision tree coordinates three routes on the ticket—**which model fits, which single tool schema the worker needs, and which memory sources should be called**. The built-in SQLite lane supplies only human-approved system rules; the ontology can also select relevant Mem0, Pinecone, or Qdrant reference providers, whose results stay explicitly unverified. A short-lived ghost acts, checks its work, returns a report, and exits. Each ticket starts a fresh worker and model conversation, while the REPL can pass a bounded history slice when continuity helps.
 
 <table>
   <tr>
-    <td width="50%"><strong>🧠 System-1 gateway</strong><br>Fast local classification, model placement, budget admission, and one-schema tool pruning.</td>
+    <td width="50%"><strong>🧠 System-1 OAG router</strong><br>One ontology coordinates model placement, one-tool pruning, and memory-provider calls.</td>
     <td width="50%"><strong>👻 Ephemeral ghosts</strong><br>A fresh worker per turn. No long-lived agent process accumulating stale working state.</td>
   </tr>
   <tr>
-    <td><strong>⚡ Lean context</strong><br>Tickets carry bounded context and a single task-relevant tool schema to the worker.</td>
+    <td><strong>⚡ Routed memory, bounded context</strong><br>Trusted SQLite rules stay authoritative; selected RAG hits enter as unverified context beside one task-relevant tool schema.</td>
     <td><strong>🧪 Work that verifies itself</strong><br>Ghosts edit, run tests, inspect failures, and return a diff and execution report.</td>
   </tr>
 </table>
 
 ## 🔁 The ghost loop
 
-<p align="center"><img src="docs/gh0st-loop.svg" alt="gh0st architecture: System-1 routes each prompt into a bounded ticket, spawns a fresh ephemeral ghost, routes model calls through a provider adapter, and records the worker report in the ledger" width="100%"></p>
+<p align="center"><img src="docs/gh0st-loop.svg" alt="gh0st OAG architecture: System-1 uses an ontological decision tree to route the model, one tool schema, and trusted SQLite plus selected unverified memory providers before spawning a fresh ephemeral ghost" width="100%"></p>
 
-1. **System-1 receives a turn.** The local Layla classifier is the zero-cost default; Jev is an optional classifier adapter.
-2. **The gateway makes the call plan.** It selects capability, model target, routing policy, budget, and one tool schema. A static `--model` override takes priority while still checking capability requirements.
+1. **System-1 walks the OAG tree.** The local Layla classifier is the zero-cost default; Jev is an optional classifier adapter. The matched task ontology drives all three decisions: model fit, one tool schema, and memory sources.
+2. **The gateway makes one bounded plan.** Model selection considers modality, domain quality floor, payload capacity, latency, and price; a static `--model` override takes priority while still checking capability requirements. Tool pruning attaches one matching schema. Memory routing always exposes eligible human-approved SQLite rules and selects only the external providers mapped to matching ontology domains.
 3. **A ticket wakes a ghost.** The short-lived worker receives its bounded context and runs the model/tool cycle for that turn. Model placement accounts for modality, task domain, quality floor, context capacity, latency, and price.
 4. **The ghost acts and exits.** It can work in its task-scoped clone, run tests, and inspect failures. It returns a report with its diff, commands, test results, usage, and unresolved issues, then the process ends.
-5. **The ledger keeps durable state.** Tickets, budgets, reports, and grant decisions persist in SQLite. Follow-up turns get a fresh worker and a deliberate context slice; interactive sessions retain bounded recent history for continuity.
+5. **The ledger keeps durable state.** Tickets persist the OAG decision, budget, and memory route alongside reports and grant decisions. Follow-up turns get a fresh worker and a deliberate context slice; interactive sessions retain bounded recent history for continuity.
 
 Model completions use gh0st's in-process provider adapters by default. An OpenAI-compatible gateway such as LiteLLM or OpenRouter can be configured as the model endpoint. The System-1 gateway handles task-level routing and governance either way.
 
@@ -146,7 +146,15 @@ Install another provider with an optional extra, for example `gh0st-core[anthrop
 
   Provider secrets can come from environment variables, files, HashiCorp Vault, or 1Password Connect. Set `GH0ST_SECRETS_PROVIDER` to `env`, `file`, `vault`, or `onepassword` and install `gh0st-core[onepassword]` for the 1Password Connect SDK.
 
-  Human-approved governance claims in SQLite are injected as system constraints. Retrieved Mem0, Pinecone, or Qdrant material is kept separate, labeled unverified, and passed only to the current ticket. Install the matching extra (`gh0st-core[mem0]`, `[pinecone]`, or `[qdrant]`) and configure `GH0ST_REFERENCE_PROVIDER` plus that service's connection settings.
+  **OAG separates authority from retrieval.** The built-in SQLite memory lane injects only trusted, valid governance claims scoped to the task as system rules. The same ontology routes eligible reference calls to external providers; their hits are tagged as unverified context, never promoted to policy, and are not copied into SQLite.
+
+  A single provider can keep using `GH0ST_REFERENCE_PROVIDER=mem0` (or `pinecone` / `qdrant`). For multiple stores, define the domain-to-provider branches once; each turn queries only providers attached to its matched domains:
+
+  ```bash
+  export GH0ST_MEMORY_ONTOLOGY_ROUTES='{"codebase":["qdrant"],"testing":["qdrant"],"documentation":["pinecone"],"architecture":["pinecone"],"project_memory":["mem0"]}'
+  ```
+
+  Install the matching extras (`gh0st-core[mem0]`, `[pinecone]`, or `[qdrant]`) and configure each service's connection settings. Supported ontology domains are `codebase`, `testing`, `documentation`, `architecture`, `operations`, `planning`, `project_memory`, and `general`; `default` can name providers used for every eligible turn. Image generation skips external retrieval.
 </details>
 
 ## 🛡️ Security model

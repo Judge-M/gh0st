@@ -59,7 +59,8 @@ class LinuxSandbox:
 
     def _command(self, shell_command: str) -> list[str]:
         args = [
-            self.bwrap, "--die-with-parent", "--unshare-user", "--unshare-pid",
+            self.bwrap, "--die-with-parent", "--cap-drop", "ALL",
+            "--unshare-user", "--unshare-pid",
             "--unshare-net", "--unshare-ipc", "--unshare-uts",
             "--clearenv", "--setenv", "PATH", "/runtime/bin:/usr/local/bin:/usr/bin:/bin" if self.runtime else "/usr/local/bin:/usr/bin:/bin",
             "--setenv", "HOME", "/workspace", "--setenv", "TMPDIR", "/tmp",

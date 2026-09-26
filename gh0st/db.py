@@ -31,6 +31,7 @@ from .models import (
     ChildTicketProposal,
     GrantRequest,
     MemoryClaim,
+    MemoryRoute,
     QuotaRecord,
     Ticket,
     TicketStatus,
@@ -78,6 +79,7 @@ class TicketRow(Base):
     assigned_model: Mapped[str] = mapped_column(Text, default="")
     routing_strategy: Mapped[str] = mapped_column(String(32), default="smart")
     attached_tool_schema_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    memory_route_json: Mapped[str] = mapped_column(Text, default="{}")
     max_tokens_allocated: Mapped[int] = mapped_column(Integer, default=4096)
     max_cost_usd: Mapped[float] = mapped_column(Float, default=0.50)
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
@@ -230,6 +232,7 @@ class StateLedger:
                     "claimed_at": "DATETIME",
                     "claim_owner": "VARCHAR(64)",
                     "lease_expires_at": "DATETIME",
+                    "memory_route_json": "TEXT NOT NULL DEFAULT '{}'",
                 },
                 "worker_reports": {
                     "diff": "TEXT NOT NULL DEFAULT ''",
@@ -449,6 +452,7 @@ class StateLedger:
                     assigned_model=ticket.assigned_model,
                     routing_strategy=ticket.routing_strategy,
                     attached_tool_schema_json=(ticket.attached_tool_schema.model_dump_json() if ticket.attached_tool_schema else None),
+                    memory_route_json=ticket.memory_route.model_dump_json(),
                     max_tokens_allocated=ticket.max_tokens_allocated,
                     max_cost_usd=ticket.max_cost_usd, status=ticket.status.value,
                 ))
@@ -469,6 +473,7 @@ class StateLedger:
             assigned_model=row.assigned_model,
             routing_strategy=getattr(row, "routing_strategy", "smart"),
             attached_tool_schema=(ToolSchema.model_validate_json(row.attached_tool_schema_json) if row.attached_tool_schema_json else None),
+            memory_route=MemoryRoute.model_validate_json(getattr(row, "memory_route_json", "{}") or "{}"),
             max_tokens_allocated=row.max_tokens_allocated,
             max_cost_usd=row.max_cost_usd,
             status=TicketStatus(row.status), created_at=row.created_at,

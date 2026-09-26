@@ -37,23 +37,21 @@ jobs:
       - name: Install bubblewrap
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap libcap2-bin python3-venv
-          # bwrap needs CAP_NET_ADMIN to configure loopback inside its private network namespace.
-          # Keep this scoped to bwrap on the disposable GitHub-hosted runner.
-          sudo setcap cap_net_admin=ep "$(command -v bwrap)"
-          getcap "$(command -v bwrap)" | grep -q 'cap_net_admin=ep'
+          sudo apt-get install --yes bubblewrap python3-venv
       - name: Install project and test dependencies
         run: |
-          /usr/bin/python3 -m venv --copies .venv
-          .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/python -m pip install -e . pytest
+          /usr/bin/python3 -m venv --copies /tmp/gh0st-venv
+          /tmp/gh0st-venv/bin/python -m pip install --upgrade pip
+          /tmp/gh0st-venv/bin/python -m pip install -e . pytest
       - name: Run Linux integration tests
         env:
-          GH0ST_SANDBOX_RUNTIME: ${{ github.workspace }}/.venv
-        run: .venv/bin/python -m pytest -q
+          GH0ST_SANDBOX_RUNTIME: /tmp/gh0st-venv
+        # GitHub's hosted VM denies loopback setup from the runner UID. Root-owned test
+        # workspaces match bubblewrap's namespace mapping; gh0st drops worker capabilities.
+        run: sudo -n -- env GH0ST_SANDBOX_RUNTIME="$GH0ST_SANDBOX_RUNTIME" /tmp/gh0st-venv/bin/python -m pytest -q
       - name: Check admission and router latency
         run: |
-          .venv/bin/python -m benchmarks.admission --directory /tmp
-          .venv/bin/python -m benchmarks.routing
+          /tmp/gh0st-venv/bin/python -m benchmarks.admission --directory /tmp
+          /tmp/gh0st-venv/bin/python -m benchmarks.routing
       - name: Build SDK wheel
-        run: .venv/bin/python -m pip wheel . --no-deps --wheel-dir dist
+        run: /tmp/gh0st-venv/bin/python -m pip wheel . --no-deps --wheel-dir dist

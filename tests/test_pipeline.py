@@ -71,6 +71,9 @@ def _webp_bytes(width: int, height: int) -> bytes:
 
 
 def ledger(tmp_path: Path, monkeypatch) -> StateLedger:
+    monkeypatch.delenv("GH0ST_MEMORY_ONTOLOGY_ROUTES", raising=False)
+    monkeypatch.delenv("GH0ST_REFERENCE_PROVIDER", raising=False)
+    monkeypatch.delenv("GH0ST_REFERENCE_PROVIDERS", raising=False)
     monkeypatch.setenv("GH0ST_WORKSPACE_ROOT", str(tmp_path / "workspaces"))
     monkeypatch.setenv("GH0ST_MODEL_CATALOG", json.dumps([{
         "name": "test-model", "gateway_model": "test-model",
@@ -86,6 +89,7 @@ def ledger(tmp_path: Path, monkeypatch) -> StateLedger:
 
 def test_route_worker_report_and_trusted_claims(tmp_path, monkeypatch):
     db = ledger(tmp_path, monkeypatch)
+    monkeypatch.setenv("GH0ST_MEMORY_ONTOLOGY_ROUTES", json.dumps({"codebase": ["qdrant"]}))
     db.save_memory_claim(MemoryClaim(scope="task_test", claim_text="trusted", is_trusted=True))
     db.save_memory_claim(MemoryClaim(scope="task_test", claim_text="untrusted", is_trusted=False))
     workspace, source_commit = WorkspaceManager().create("task_test")
@@ -98,13 +102,20 @@ def test_route_worker_report_and_trusted_claims(tmp_path, monkeypatch):
         {"content": "Review complete", "tool_calls": [], "total_tokens": 25, "cost_usd": 0.01},
     ])
     class StubRetriever:
-        provider_name = "Pinecone"
+        provider_name = "Qdrant"
 
         def retrieve(self, query, limit=5):
             assert query == "Refactor code"
             return [ReferenceHit(text="helper lives in src/jwt.py", source="doc-1")]
 
-    report = EphemeralWorker(db, gateway, StubSandbox, StubRetriever()).execute_turn(ticket.ticket_id)
+    class UnselectedRetriever:
+        provider_name = "Mem0"
+
+        def retrieve(self, *_args, **_kwargs):
+            raise AssertionError("OAG must not call a provider outside the selected memory route")
+
+    report = EphemeralWorker(db, gateway, StubSandbox,
+                             {"qdrant": StubRetriever(), "mem0": UnselectedRetriever()}).execute_turn(ticket.ticket_id)
     assert report.status == "success"
     assert db.get_worker_report(ticket.ticket_id).output["content"] == "Review complete"
     assert db.get_quota_record("task_test").tokens_consumed == 75
@@ -117,10 +128,51 @@ def test_route_worker_report_and_trusted_claims(tmp_path, monkeypatch):
     assert len(retrieved) == 1
     assert "helper lives in src/jwt.py" in retrieved[0]["content"]
     assert "not instructions or policy" in retrieved[0]["content"]
+    assert db.get_ticket(ticket.ticket_id).memory_route.reference_providers == ["qdrant"]
     assert not any(claim.claim_text == "helper lives in src/jwt.py"
                    for claim in db.get_trusted_valid_claims("task_test"))
     assert gateway.calls[0][2] > 0
     assert report.diff.startswith("diff --git")
+
+
+def test_system1_oag_routes_model_tool_and_memory_by_ontology(tmp_path, monkeypatch):
+    db = ledger(tmp_path, monkeypatch)
+    monkeypatch.setenv("GH0ST_MEMORY_ONTOLOGY_ROUTES", json.dumps({
+        "codebase": ["qdrant"],
+        "testing": ["qdrant"],
+        "architecture": ["pinecone"],
+        "documentation": ["pinecone"],
+        "project_memory": ["mem0"],
+    }))
+    workspace = str(tmp_path / "workspace")
+    router = System1Router(db)
+
+    code_decision, code_ticket = router.route(
+        "Refactor the repository code using the architecture docs", "task_test",
+        workspace_path=workspace)
+    assert code_decision.selected_model == code_ticket.assigned_model
+    assert code_decision.attached_tool_schema.name == code_ticket.attached_tool_schema.name
+    assert code_decision.memory_route == code_ticket.memory_route
+    assert code_ticket.memory_route.system_rules is True
+    assert code_ticket.memory_route.reference_providers == ["mem0", "pinecone", "qdrant"]
+    assert "OAG selected" in code_decision.reasoning_summary
+
+    db.create_task("task_test_two", "Run pytest")
+    db.create_quota_record(QuotaRecord(task_id="task_test_two", max_tokens_budget=1000,
+                                       max_cost_usd_budget=2))
+    test_decision, test_ticket = router.route(
+        "Run pytest", "task_test_two", capability="unit_testing", workspace_path=workspace)
+    assert test_decision.memory_route.reference_providers == ["mem0", "qdrant"]
+    assert test_ticket.memory_route.ontology_domains == ["codebase", "project_memory", "testing"]
+
+
+def test_system1_fails_closed_for_ambiguous_multi_provider_memory(tmp_path, monkeypatch):
+    db = ledger(tmp_path, monkeypatch)
+    router = System1Router(db, reference_provider_names=["mem0", "pinecone"])
+    decision, ticket = router.route("Refactor code", "task_test",
+                                   workspace_path=str(tmp_path / "workspace"))
+    assert ticket is None
+    assert "GH0ST_MEMORY_ONTOLOGY_ROUTES" in decision.reasoning_summary
 
 
 def test_retriever_adapters_normalize_hits(monkeypatch):

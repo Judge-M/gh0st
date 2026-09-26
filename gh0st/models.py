@@ -5,7 +5,7 @@ Architectural Foundation: Pydantic v2
 """
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 from datetime import datetime, timezone
 import uuid
 from pydantic import BaseModel, Field, ConfigDict
@@ -46,6 +46,13 @@ class ToolSchema(BaseModel):
     parameters: Dict[str, Any] = Field(default_factory=dict, description="JSON Schema for function arguments")
 
 
+class MemoryRoute(BaseModel):
+    """System-1 OAG memory decision carried with a ticket."""
+    system_rules: Literal[True] = Field(default=True, description="Always load trusted, scope-matched SQLite governance rules")
+    ontology_domains: List[str] = Field(default_factory=list, description="Matched OAG memory domains")
+    reference_providers: List[str] = Field(default_factory=list, description="External untrusted retrievers selected for this turn")
+
+
 class ChildTicketProposal(BaseModel):
     """Proposal emitted by an ephemeral worker for downstream sub-tasks."""
     capability: str = Field(description="Capability cluster identifier")
@@ -73,6 +80,7 @@ class Ticket(BaseModel):
 
     # 1-Schema Rule
     attached_tool_schema: Optional[ToolSchema] = Field(default=None, description="Strictly 1 tool schema attached by System-1")
+    memory_route: MemoryRoute = Field(default_factory=MemoryRoute, description="OAG-selected built-in and external memory paths")
 
     # Budget Caps
     max_tokens_allocated: int = Field(default=4096, ge=1, description="Max prompt + output tokens allowed")
@@ -162,5 +170,6 @@ class System1Decision(BaseModel):
     execution_tier: ExecutionTier
     compute_placement: ComputePlacement
     attached_tool_schema: Optional[ToolSchema] = None
+    memory_route: MemoryRoute = Field(default_factory=MemoryRoute)
     requires_planner: bool = Field(default=False, description="True if confidence < 0.90")
     reasoning_summary: str = Field(default="")

@@ -14,7 +14,7 @@
 
 ### Key Architectural Tenets
 1. **Zero Orchestrator Model:** Eliminates persistent manager LLMs (e.g., Claude Code, Codex, or manager agents maintaining 50k+ token conversation histories). There is no "orchestrator" holding state in memory.
-2. **Sub-100ms System-1 Gateway Router:** Replaces open-ended LLM planning with a fast, single-pass classifier using an **Ontological Decision Tree (OAG)**. Default router is **Layla** (local, $0 spend), with a pluggable interface supporting **Jev** or future specialized classification models.
+2. **Sub-100ms System-1 Gateway Router:** Replaces open-ended LLM planning with a fast classifier and **Ontological Augmented Generation (OAG)** decision tree. One ontology coordinates model placement, one-schema tool selection, and memory calls. Default classifier is **Layla** (local, $0 spend), with a pluggable interface supporting **Jev** or future specialized classifiers.
 3. **Purely Ephemeral Workers:** Execution workers are short-lived, task-scoped, serverless Python processes (`python3 worker.py`). A worker wakes up from a database/queue event, reads its ticket state, executes a bounded task, writes its result (`WorkerReport`) back to the database, and **immediately terminates (`sys.exit(0)`)**.
 4. **Short-Lived Process Execution:** Eliminates persistent manager processes. Local workbench commands execute inside a Linux process and mount boundary with no network access, using a task-scoped clone as the only persistent writable mount.
 5. **Pluggable Gateway Shell Architecture:** Offloads model provider translations, tool calling schema syntax, streaming protocols, vendor API churn, and provider failover to established external gateways (e.g., LiteLLM, OpenRouter, FastMCP / MCP Proxy). `gh0st` operates as an intelligent **System-1 Routing & Governance Shell** around these pluggable gateways.
@@ -37,7 +37,8 @@
 │  • Router Core: Default Layla (Local, $0 spend) | Pluggable: Jev / Custom Classifier   │
 │  • Sub-100ms Ontological Decision Tree (OAG)                                           │
 │  • Pre-flight Budget Gate & Quota Check (`quota_records`)                              │
-│  • Prunes tool schemas down to 1-schema per turn                                       │
+│  • Routes model target, prunes tools to 1-schema, and selects memory sources            │
+│  • SQLite trusted rules + ontology-selected Mem0 / Pinecone / Qdrant references        │
 │  • Generates Approved Seam Ticket Payload                                              │
 └───────────────────────────┬────────────────────────────────────────────────────────────┘
                             │
@@ -157,15 +158,16 @@ To control local or cloud `gh0st` instances from the mobile app or web interface
 
 ---
 
-## 5. Sub-100ms System-1 Gateway & Ontological Decision Tree (OAG)
+## 5. System-1 Gateway & Ontological Augmented Generation (OAG)
 
-System-1 operates as an upfront **Governance & Routing Shell** that traverses a deterministic 3-hop decision tree focused strictly on **Capability Matching** and **Budget Constraints**.
+System-1 is the decision layer that gives `gh0st` its routing identity. It classifies a turn, walks the task ontology, and writes a single, inspectable plan into the ticket. The OAG tree coordinates model placement, one-schema tool selection, and memory calls, with budget and payload checks gating dispatch.
 
 ### The 3-Hop Decision Flow
 1. **Hop 1 — Capability Matching (What needs to be done?):**
    * Classifies user prompt intent against a static **Template Registry**.
    * Selects the corresponding Seam `Ticket` template payload (`objective`, `constraints`, `capabilities`).
    * **1-Schema Rule:** Prunes the global tool registry down to **exactly 1 tool schema per worker turn**, protecting worker context windows.
+   * Produces the capability and ontology labels used to select the ticket's model and memory routes.
 2. **Hop 2 — Performance & Complexity Tiering (How hard is it?):**
    * Classifies reasoning depth:
      * *Low Complexity:* Formatting, syntax checks, basic file lookups $\rightarrow$ assigned to low-cost or local model endpoints.
@@ -174,6 +176,24 @@ System-1 operates as an upfront **Governance & Routing Shell** that traverses a 
    * Inspects active task budget in `quota_records`.
    * Maps required performance tier to configured pluggable gateway target (e.g., Local vLLM endpoint $\rightarrow$ Rented GPU $\rightarrow$ Cloud API via LiteLLM/OpenRouter).
    * **Fail-Closed:** Over-budget requests halt in <1ms without launching worker processes.
+
+### OAG Memory Routing
+
+The built-in SQLite lane supplies only trusted, valid governance rules for the task scope. OAG matches the turn's capability and ontology domains to configured external reference providers. The ticket records the selected provider list, and the worker calls only those providers. External hits are passed as unverified reference context; they never become system policy or SQLite claims through retrieval.
+
+The local ontology recognizes `codebase`, `testing`, `documentation`, `architecture`, `operations`, `planning`, `project_memory`, and `general` domains. Operators map those domains to Mem0, Pinecone, and/or Qdrant with `GH0ST_MEMORY_ONTOLOGY_ROUTES`, for example:
+
+```json
+{
+  "codebase": ["qdrant"],
+  "testing": ["qdrant"],
+  "documentation": ["pinecone"],
+  "architecture": ["pinecone"],
+  "project_memory": ["mem0"]
+}
+```
+
+Only providers mapped to matched domains are queried. A `default` route may add a provider to every eligible turn. The legacy `GH0ST_REFERENCE_PROVIDER` setting remains available for one provider; configurations with multiple providers require explicit ontology routes. Image generation skips external retrieval.
 
 ### Confidence Thresholds
 * **High Confidence ($\ge 0.90$):** Gateway packages the Seam `Ticket` and pushes it directly onto the central queue.
@@ -270,8 +290,8 @@ When a Planner worker decomposes a project or an execution worker discovers requ
 `gh0st` keeps authoritative governance separate from retrieved material.
 
 ### Memory & Token Rules
-* **System Rules & Governance:** Human-approved SQLite claims are included in a distinct system instruction message. Only valid claims with `is_trusted = TRUE` are eligible; untrusted or expired claims are excluded.
-* **Retrieved Reference Context:** Optional Mem0, Pinecone, and Qdrant adapters query their configured service directly. Results are labeled as unverified reference data, are not written to SQLite, and do not acquire policy authority through retrieval.
+* **System Rules & Governance:** The built-in OAG memory lane reads task-scoped SQLite claims into a distinct system instruction message. Only promoted, valid claims with `is_trusted = TRUE` are eligible; untrusted or expired claims are excluded.
+* **Retrieved Reference Context:** OAG matches ontology domains to configured Mem0, Pinecone, and Qdrant providers and persists the selected provider list on the ticket. The worker queries only those providers. Results are labeled unverified, are not written to SQLite, and do not acquire policy authority through retrieval. Without a matching external route, the turn uses its built-in SQLite lane alone.
 * **Pre-Dispatch Token Clamping:** Prompts are tokenized locally (`tiktoken` / `cl100k_base` / `o200k_base`) before dispatch. `max_tokens` is clamped to the remaining task budget in `quota_records`.
 
 ---
@@ -292,7 +312,7 @@ When a Planner worker decomposes a project or an execution worker discovers requ
 * [x] **Milestone 1: Database Schema & Protocol Contracts (`gh0st-milestone1-db.py`)**
   * Implemented `Ticket`, `WorkerReport`, `QuotaRecord`, and `MemoryClaim` Pydantic models & SQLAlchemy persistence.
 * [x] **Milestone 2: Sub-100ms System-1 Gateway Shell & Pluggable Router (`gh0st-milestone2-router.py`)**
-  * Implemented 3-hop OAG decision tree, `LaylaClassifier` default, 1-schema tool pruner, and budget checks.
+  * Implemented OAG decisions for model placement, one-schema tool pruning, and ontology-routed memory calls; `LaylaClassifier` is the default, and budget checks gate ticket dispatch.
 * [x] **Milestone 3: Ephemeral Worker Runtime & Pluggable Gateway Adapter (`gh0st-milestone3-worker.py`)**
   * Implemented `EphemeralWorker` execution loop, `PluggableGatewayAdapter`, and child ticket re-entry handlers.
 * [x] **Milestone 4: Multi-Surface CLI & Self-Hosted Relay Tunnel (`gh0st/cli.py`, `gh0st/relay.py`, `gh0st/broker.py`)**
