@@ -37,9 +37,46 @@ jobs:
       - name: Install bubblewrap
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap python3-venv
-          # Keep bwrap unprivileged: file capabilities are unsupported and
-          # prevent it from creating the worker's user and network namespaces.
+          sudo apt-get install --yes bubblewrap iproute2 python3-venv
+      - name: Configure bubblewrap for the hosted runner
+        run: |
+          wrapper_dir="$RUNNER_TEMP/gh0st-bin"
+          mkdir -p "$wrapper_dir"
+          cat > "$wrapper_dir/bwrap" <<'EOF'
+          #!/bin/bash
+          set -eu
+          uid="$(id -u)"
+          gid="$(id -g)"
+          found_netns=false
+          args=()
+          for arg in "$@"; do
+            args+=("$arg")
+            if [[ "$arg" == "--unshare-net" ]]; then
+              args+=("--share-net")
+              found_netns=true
+            fi
+          done
+          if [[ "$found_netns" != true ]]; then
+            echo "bubblewrap command did not request network isolation" >&2
+            exit 2
+          fi
+          namespace="gh0st-ci-$$-$RANDOM"
+          cleanup() {
+            sudo -n ip netns delete "$namespace" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          sudo -n ip netns add "$namespace"
+          sudo -n ip -n "$namespace" link set lo up
+          if sudo -n nsenter --net="/run/netns/$namespace" \
+            --setgid="$gid" --setuid="$uid" -- /usr/bin/bwrap "${args[@]}"; then
+            status=0
+          else
+            status=$?
+          fi
+          exit "$status"
+          EOF
+          chmod +x "$wrapper_dir/bwrap"
+          echo "$wrapper_dir" >> "$GITHUB_PATH"
       - name: Install project and test dependencies
         run: |
           /usr/bin/python3 -m venv --copies .venv
