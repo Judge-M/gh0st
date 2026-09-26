@@ -1,0 +1,43 @@
+name: Linux release gates
+
+on:
+  push:
+    branches: [main, "milestone*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-release-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap python3-venv
+      - name: Install project and test dependencies
+        run: |
+          /usr/bin/python3 -m venv --copies .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -e . pytest
+      - name: Run Linux integration tests
+        env:
+          GH0ST_SANDBOX_RUNTIME: ${{ github.workspace }}/.venv
+        run: .venv/bin/python -m pytest -q
+      - name: Check admission and router latency
+        run: |
+          .venv/bin/python -m benchmarks.admission --directory /tmp
+          .venv/bin/python -m benchmarks.routing
+      - name: Build SDK wheel
+        run: .venv/bin/python -m pip wheel . --no-deps --wheel-dir dist
