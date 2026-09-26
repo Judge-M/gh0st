@@ -37,11 +37,9 @@ jobs:
       - name: Install bubblewrap
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap libcap2-bin python3-venv
-          # bwrap needs CAP_NET_ADMIN to configure loopback inside its private network namespace.
-          # Keep this scoped to bwrap on the disposable GitHub-hosted runner.
-          sudo setcap cap_net_admin=ep "$(command -v bwrap)"
-          getcap "$(command -v bwrap)" | grep -q 'cap_net_admin=ep'
+          sudo apt-get install --yes bubblewrap python3-venv
+          # Keep bwrap unprivileged: file capabilities are unsupported and
+          # prevent it from creating the worker's user and network namespaces.
       - name: Install project and test dependencies
         run: |
           /usr/bin/python3 -m venv --copies .venv
