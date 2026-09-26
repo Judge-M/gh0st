@@ -29,6 +29,12 @@ jobs:
       - name: Install mobile dependencies
         working-directory: interfaces/mobile
         run: pnpm install --frozen-lockfile
+      - name: Validate Expo and EAS build configuration
+        working-directory: interfaces/mobile
+        run: |
+          node -e "const config = require('./eas.json'); if (!config.build.preview || !config.build.production) process.exit(1)"
+          node node_modules/expo/bin/cli config --type public --json > /tmp/gh0st-expo-config.json
+          node -e "const config = require('/tmp/gh0st-expo-config.json'); if (config.ios.bundleIdentifier !== 'org.cyberexperts.gh0st' || config.android.package !== 'org.cyberexperts.gh0st') process.exit(1)"
       - name: Type-check mobile app
         working-directory: interfaces/mobile
         run: pnpm typecheck

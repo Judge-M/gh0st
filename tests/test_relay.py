@@ -258,6 +258,19 @@ def test_paired_daemon_handles_encrypted_status_grant_and_dispatch(tmp_path, mon
                     assert json.loads(await asyncio.wait_for(client.recv(), 5))["message_type"] == "transport_connected"
                     cipher = PairCipher(secret, pair_id, "client")
                     assert cipher.decrypt(json.loads(await asyncio.wait_for(client.recv(), 5)))["message_type"] == "paired"
+                    await client.send(json.dumps(cipher.encrypt({
+                        "action_id": "act_push_register", "action_type": "register_push",
+                        "token": "ExpoPushToken[private_token]",
+                    })))
+                    registered_push = cipher.decrypt(json.loads(await asyncio.wait_for(client.recv(), 5)))
+                    assert registered_push["result"] == {"registered": True}
+                    assert daemon.push_tokens[pair_id] == "ExpoPushToken[private_token]"
+                    await client.send(json.dumps(cipher.encrypt({
+                        "action_id": "act_push_bad", "action_type": "register_push",
+                        "token": "https://example.test/token",
+                    })))
+                    rejected_push = cipher.decrypt(json.loads(await asyncio.wait_for(client.recv(), 5)))
+                    assert rejected_push["ok"] is False
                     assert db.get_relay_pair(pair_id)["secret"] == ""
                     await client.send(json.dumps(cipher.encrypt({
                         "action_id": "act_status", "action_type": "status", "task_id": "task_one",
@@ -286,6 +299,13 @@ def test_paired_daemon_handles_encrypted_status_grant_and_dispatch(tmp_path, mon
                                for item in responses)
                     assert dispatched[0][0] == "Fix a parser bug"
                     assert dispatched[0][1]["source_repo"] == configured_repo
+                    assert daemon.push_tokens[pair_id] == "ExpoPushToken[private_token]"
+                    await client.send(json.dumps(cipher.encrypt({
+                        "action_id": "act_push_unregister", "action_type": "unregister_push",
+                    })))
+                    unregistered_push = cipher.decrypt(json.loads(await asyncio.wait_for(client.recv(), 5)))
+                    assert unregistered_push["result"] == {"registered": False}
+                    assert pair_id not in daemon.push_tokens
                     await client.send(json.dumps(cipher.encrypt({
                         "action_id": "act_overbudget", "action_type": "dispatch_task",
                         "prompt": "Too expensive", "budget_usd": 100,

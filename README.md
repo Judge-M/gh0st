@@ -121,6 +121,8 @@ The VS Code extension in `interfaces/vscode` shows recent tasks, their tickets, 
 
 The Tauri desktop app in `interfaces/tauri` uses a Rust bridge restricted to the local daemon on `127.0.0.1`. It lists tasks, shows quota and worker reports, dispatches repository tasks, and records grant decisions. The API token is entered for the current app session and is not saved. The Linux release build has produced Debian and AppImage bundles; rebuild on a Linux machine with the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and Rust installed using `cd interfaces/tauri && pnpm install && pnpm build`.
 
+Mobile preview and production build profiles are configured in `interfaces/mobile/eas.json`. See the [mobile release checklist](docs/mobile-release.md) for EAS commands and the physical-device checks still required before store publication.
+
 The broker container and TLS-enabled Compose deployment are defined in `Dockerfile.broker` and `compose.broker.yaml`; see the [relay deployment guide](docs/relay-deployment.md). CI builds the container and checks its command entry point without publishing an image.
 
 ```bash
