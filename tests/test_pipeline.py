@@ -44,6 +44,31 @@ class StubSandbox:
         return CommandResult(command, purpose, 0, output, "", 0.01)
 
 
+def _png_bytes(width: int, height: int) -> bytes:
+    import struct
+    import zlib
+
+    def chunk(name, payload):
+        return (len(payload).to_bytes(4, "big") + name + payload
+                + (zlib.crc32(name + payload) & 0xFFFFFFFF).to_bytes(4, "big"))
+
+    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    row = b"\x00" + b"\x00\x00\x00" * width
+    pixels = zlib.compress(row * height)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", pixels) + chunk(b"IEND", b"")
+
+
+def _jpeg_bytes(width: int, height: int) -> bytes:
+    return (b"\xff\xd8\xff\xc0\x00\x11\x08" + height.to_bytes(2, "big")
+            + width.to_bytes(2, "big") + b"\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00\xff\xd9")
+
+
+def _webp_bytes(width: int, height: int) -> bytes:
+    dimensions = ((width - 1).to_bytes(3, "little") + (height - 1).to_bytes(3, "little"))
+    chunk = b"VP8X\x0a\x00\x00\x00\x00\x00\x00\x00" + dimensions
+    return b"RIFF" + (len(chunk) + 4).to_bytes(4, "little") + b"WEBP" + chunk
+
+
 def ledger(tmp_path: Path, monkeypatch) -> StateLedger:
     monkeypatch.setenv("GH0ST_WORKSPACE_ROOT", str(tmp_path / "workspaces"))
     monkeypatch.setenv("GH0ST_MODEL_CATALOG", json.dumps([{
@@ -141,7 +166,7 @@ def test_vision_dispatch_copies_images_outside_editable_clone(tmp_path, monkeypa
         "max_payload_tokens": 16384, "quality": "frontier",
     }]))
     source_image = tmp_path / "input.png"
-    source_image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"image payload")
+    source_image.write_bytes(_png_bytes(1, 1))
     client = Gh0stClient(f"sqlite:///{(tmp_path / 'vision.db').as_posix()}",
                          str(tmp_path / "workspaces"))
 
@@ -172,6 +197,72 @@ def test_vision_dispatch_rejects_unrecognized_image_content(tmp_path, monkeypatc
     with pytest.raises(ValueError, match="contents do not match"):
         client.dispatch("Describe this screenshot", image_paths=[str(source_image)])
     assert not client.ledger.list_tasks(10)
+
+
+def test_vision_token_reservation_accounts_for_image_dimensions(tmp_path):
+    from gh0st.workspace import WorkspaceManager
+
+    source_image = tmp_path / "large.png"
+    source_image.write_bytes(_png_bytes(2048, 1024))
+    prepared = WorkspaceManager.validate_image_inputs([str(source_image)])
+    assert prepared[0]["media_type"] == "image/png"
+    assert prepared[0]["size"] > 0
+    assert WorkspaceManager.validate_image_inputs([str(source_image)])
+
+
+def test_image_generation_requires_explicit_modality_and_price(tmp_path, monkeypatch):
+    catalog = [{
+        "name": "image-test", "gateway_model": "openai:image-test",
+        "modalities": ["image"], "context_window": 8192,
+        "max_payload_tokens": 4096, "quality": "basic",
+    }, {
+        "name": "text-test", "gateway_model": "openai:text-test",
+        "modalities": ["text", "code"], "context_window": 8192,
+        "max_payload_tokens": 4096, "quality": "frontier",
+    }]
+    monkeypatch.setenv("GH0ST_MODEL_CATALOG", json.dumps(catalog))
+    client = Gh0stClient(f"sqlite:///{(tmp_path / 'image-generation.db').as_posix()}",
+                         str(tmp_path / "workspaces"))
+
+    rejected = client.dispatch("Create an image of a lighthouse")
+    assert rejected.ticket is not None
+    assert rejected.ticket.capability != "image_generation"
+
+    opted_in = client.dispatch("Create an image of a lighthouse", modality="image")
+    assert opted_in.ticket is None
+    assert "image_generation_cost_usd" in opted_in.decision.reasoning_summary
+
+
+def test_opted_in_image_generation_saves_task_artifact_and_charges_fixed_price(tmp_path, monkeypatch):
+    monkeypatch.setenv("GH0ST_MODEL_CATALOG", json.dumps([{
+        "name": "image-test", "gateway_model": "openai:image-test",
+        "modalities": ["image"], "context_window": 8192,
+        "max_payload_tokens": 4096, "quality": "basic",
+        "image_generation_cost_usd": 0.04,
+    }]))
+    client = Gh0stClient(f"sqlite:///{(tmp_path / 'image-generation-run.db').as_posix()}",
+                         str(tmp_path / "workspaces"))
+    dispatch = client.dispatch("Create a lighthouse illustration", modality="image",
+                               budget_usd=1.0, budget_tokens=1000)
+    assert dispatch.ticket is not None
+
+    class ImageGateway:
+        def complete_turn(self, *_args):
+            raise AssertionError("Image generation must use the image API directly")
+
+        def generate_image(self, *_args, **_kwargs):
+            return _png_bytes(1, 1)
+
+    worker = EphemeralWorker(client.ledger, gateway=ImageGateway(), sandbox_factory=StubSandbox)
+    report = worker.execute_turn(dispatch.ticket.ticket_id)
+
+    assert report.status == "success"
+    artifact = Path(report.output["generated_image"]["path"])
+    assert artifact.is_relative_to(Path(dispatch.ticket.workspace_path))
+    assert artifact.read_bytes() == _png_bytes(1, 1)
+    assert report.cost_usd == pytest.approx(0.04)
+    assert report.tokens_used == 1
+    assert report.diff
 
 
 def test_quota_blocks_dispatch(tmp_path, monkeypatch):
@@ -252,7 +343,7 @@ def test_local_api_accepts_task_scoped_vision_image(tmp_path, monkeypatch):
     }]))
     monkeypatch.setattr(Gh0stCLI, "process_queue", lambda *args, **kwargs: None)
     source_image = tmp_path / "api-input.webp"
-    source_image.write_bytes(b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"image payload")
+    source_image.write_bytes(_webp_bytes(1, 1))
     db = StateLedger(f"sqlite:///{(tmp_path / 'api-vision.db').as_posix()}")
     db.init_db()
     client = TestClient(create_app(db, str(tmp_path / "workspaces")))
@@ -279,7 +370,7 @@ def test_cli_image_flag_selects_vision_routing(tmp_path, monkeypatch):
     monkeypatch.setattr(Gh0stCLI, "process_queue",
                         lambda cli, task_id, *args, **kwargs: cli.db.set_task_status(task_id, "completed"))
     source_image = tmp_path / "cli-input.jpg"
-    source_image.write_bytes(b"\xff\xd8\xff" + b"image payload")
+    source_image.write_bytes(_jpeg_bytes(1, 1))
     db_url = f"sqlite:///{(tmp_path / 'cli-vision.db').as_posix()}"
     monkeypatch.setattr(sys, "argv", [
         "gh0st", "--db-url", db_url, "--workspace-root", str(tmp_path / "workspaces"),

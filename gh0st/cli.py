@@ -176,7 +176,8 @@ class Gh0stCLI:
         return self.db.get_interactive_session(session_id)
 
     def run_session_turn(self, session_id: str, prompt: str,
-                         gateway_url: Optional[str] = None, on_routed=None, on_text_delta=None):
+                         gateway_url: Optional[str] = None, on_routed=None, on_text_delta=None,
+                         modality: Optional[str] = None):
         session = self.db.get_interactive_session(session_id)
         if session is None:
             raise ValueError(f"Unknown interactive session: {session_id}")
@@ -189,6 +190,7 @@ class Gh0stCLI:
             prompt, task_id, workspace_path=session["workspace_path"],
             source_commit=session["source_commit"],
             model_override=session["selected_model"] or None,
+            modality=modality,
             routing_strategy=session["routing_strategy"],
             context_slice={"conversation_history": history},
         )

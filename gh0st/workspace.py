@@ -4,20 +4,73 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 from typing import Optional
 
 
 _TASK_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_IMAGE_TYPES = {
-    ".png": ("image/png", b"\x89PNG\r\n\x1a\n"),
-    ".jpg": ("image/jpeg", b"\xff\xd8\xff"),
-    ".jpeg": ("image/jpeg", b"\xff\xd8\xff"),
-    ".webp": ("image/webp", b"RIFF"),
-}
+_IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg", ".webp": "image/webp"}
 MAX_IMAGE_COUNT = 8
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
-IMAGE_TOKEN_RESERVE = 4096
+
+
+def image_header_matches(media_type: str, header: bytes) -> bool:
+    if media_type == "image/png":
+        return header.startswith(b"\x89PNG\r\n\x1a\n")
+    if media_type == "image/jpeg":
+        return header.startswith(b"\xff\xd8\xff")
+    if media_type == "image/webp":
+        return len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"WEBP"
+    return False
+
+
+def conservative_image_tokens(media_type: str, data: bytes) -> int:
+    """Upper bound image dimensions at 512-pixel tiles, plus protocol overhead."""
+    if not image_header_matches(media_type, data[:32]):
+        raise ValueError("Image contents do not match the declared media type")
+    width = height = 0
+    if media_type == "image/png" and len(data) >= 24:
+        width, height = struct.unpack(">II", data[16:24])
+    elif media_type == "image/jpeg":
+        index = 2
+        while index + 4 <= len(data):
+            if data[index] != 0xFF:
+                index += 1
+                continue
+            marker = data[index + 1]
+            index += 2
+            if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
+                continue
+            if index + 2 > len(data):
+                break
+            length = int.from_bytes(data[index:index + 2], "big")
+            if length < 2 or index + length > len(data):
+                break
+            if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                          0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF} and length >= 7:
+                height, width = struct.unpack(">HH", data[index + 3:index + 7])
+                break
+            index += length
+    elif media_type == "image/webp" and len(data) >= 30:
+        if int.from_bytes(data[4:8], "little") + 8 > len(data):
+            raise ValueError("WebP image is truncated")
+        chunk = data[12:16]
+        if chunk == b"VP8X":
+            width = int.from_bytes(data[24:27], "little") + 1
+            height = int.from_bytes(data[27:30], "little") + 1
+        elif chunk == b"VP8 " and len(data) >= 30 and data[23:26] == b"\x9d\x01\x2a":
+            width = int.from_bytes(data[26:28], "little") & 0x3FFF
+            height = int.from_bytes(data[28:30], "little") & 0x3FFF
+        elif chunk == b"VP8L" and len(data) >= 25 and data[20] == 0x2F:
+            bits = int.from_bytes(data[21:25], "little")
+            width = (bits & 0x3FFF) + 1
+            height = ((bits >> 14) & 0x3FFF) + 1
+    if width <= 0 or height <= 0:
+        raise ValueError("Image dimensions could not be validated")
+    tiles = ((width + 511) // 512) * ((height + 511) // 512)
+    return tiles * 1024 + 512
 
 
 def _git(*args: str, cwd: Optional[Path] = None) -> str:
@@ -86,20 +139,23 @@ class WorkspaceManager:
             source = Path(image_path).expanduser().resolve(strict=True)
             if not source.is_file():
                 raise ValueError(f"Image input is not a regular file: {image_path}")
-            media = _IMAGE_TYPES.get(source.suffix.lower())
-            if media is None:
+            media_type = _IMAGE_TYPES.get(source.suffix.lower())
+            if media_type is None:
                 raise ValueError(f"Unsupported image type for {image_path}; use PNG, JPEG, or WebP")
             size = source.stat().st_size
             if size <= 0 or size > MAX_IMAGE_BYTES:
                 raise ValueError(f"Each image must be between 1 byte and {MAX_IMAGE_BYTES} bytes")
             with source.open("rb") as stream:
                 header = stream.read(12)
-            if not header.startswith(media[1]) or (media[0] == "image/webp" and header[8:12] != b"WEBP"):
-                raise ValueError(f"Image contents do not match the {media[0]} file extension")
+            if not image_header_matches(media_type, header):
+                raise ValueError(f"Image contents do not match the {media_type} file extension")
+            content = source.read_bytes()
+            if conservative_image_tokens(media_type, content) > 131_072:
+                raise ValueError("Image dimensions exceed the supported input limit")
             total_bytes += size
             if total_bytes > MAX_IMAGE_BYTES:
                 raise ValueError(f"Attached images may not exceed {MAX_IMAGE_BYTES} bytes in total")
-            prepared.append({"source": str(source), "media_type": media[0], "size": size,
+            prepared.append({"source": str(source), "media_type": media_type, "size": size,
                              "filename": source.name})
         return prepared
 
@@ -125,16 +181,24 @@ class WorkspaceManager:
             for index, item in enumerate(prepared, start=1):
                 source = Path(str(item["source"])).resolve(strict=True)
                 media_type = str(item["media_type"])
+                size = int(item["size"])
+                if source.stat().st_size != size or size > MAX_IMAGE_BYTES:
+                    raise ValueError("Image input changed after validation")
                 extension = ".jpg" if media_type == "image/jpeg" else ".png" if media_type == "image/png" else ".webp"
                 destination = task_inputs / f"image_{index:02d}{extension}"
                 with source.open("rb") as source_stream, destination.open("xb") as target_stream:
                     shutil.copyfileobj(source_stream, target_stream)
+                copied = destination.read_bytes()
+                if (len(copied) != size or not image_header_matches(media_type, copied[:32])
+                        or conservative_image_tokens(media_type, copied) > 131_072):
+                    raise ValueError("Image input changed during task staging")
                 try:
                     os.chmod(destination, 0o600)
                 except OSError:
                     pass
                 records.append({"path": str(destination), "media_type": media_type,
-                                "filename": str(item["filename"]), "size": int(item["size"])})
+                                "filename": str(item["filename"]), "size": size,
+                                "reserved_tokens": conservative_image_tokens(media_type, copied)})
         except Exception:
             shutil.rmtree(task_inputs)
             raise

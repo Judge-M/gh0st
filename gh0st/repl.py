@@ -69,6 +69,7 @@ class InteractiveShell:
                 "/model [provider:model|auto]  Select a fixed model or return to routing\n"
                 "/routing [smart|cost|quality|speed|local]  Select a placement policy\n"
                 "/budget [USD]  Show or raise the session budget\n"
+                "/image <prompt>  Generate one image for this turn (requires an image model)\n"
                 "/clear  Clear conversation context; keep task files and ledger records\n"
                 "/exit  Close this terminal session"
             )
@@ -98,6 +99,11 @@ class InteractiveShell:
                     self.console.print(f"Session budget set to ${total:.2f}")
                 except ValueError as exc:
                     self.console.print(f"Budget unchanged: {exc}", style="yellow")
+        elif command == "/image":
+            if not argument:
+                self.console.print("Usage: /image <prompt>")
+            else:
+                self.process_prompt(argument, modality="image")
         elif command == "/clear":
             self.cli.db.clear_session_history(self.session_id)
             self.console.print("Conversation context cleared. Task workspace and audit history remain.")
@@ -105,7 +111,7 @@ class InteractiveShell:
             self.console.print(f"Unknown command: {command}. Type /help for commands.", style="yellow")
         return True
 
-    def process_prompt(self, prompt: str) -> None:
+    def process_prompt(self, prompt: str, modality: Optional[str] = None) -> None:
         if prompt.startswith("/"):
             self._handle_command(prompt)
             return
@@ -124,13 +130,15 @@ class InteractiveShell:
             decision, report = self.cli.run_session_turn(
                 self.session_id, prompt, self.gateway_url, on_routed=show_route,
                 on_text_delta=lambda text: (streamed_parts.append(text), self.console.print(
-                    text, end="", markup=False, highlight=False)),
+                    text, end="", markup=False, highlight=False)), modality=modality,
             )
             if streamed_parts:
                 self.console.print()
             elif report.output.get("content"):
                 self.console.print()
                 self.console.print(str(report.output["content"]), markup=False)
+            if report.output.get("generated_image"):
+                self.console.print(f"  ✓ Generated image: {report.output['generated_image']['path']}")
             for command in report.commands_executed:
                 purpose = command.get("purpose", "action")
                 result = "✓" if command.get("exit_code") == 0 else "✗"

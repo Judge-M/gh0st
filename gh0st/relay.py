@@ -30,7 +30,7 @@ class RunRequest(BaseModel):
     max_budget_tokens: int = Field(default=100000, ge=1)
     source_repo: Optional[str] = None
     model: Optional[str] = None
-    modality: Optional[str] = None
+    modality: Optional[Literal["text", "code", "vision", "image"]] = None
     image_paths: list[str] = Field(default_factory=list, max_length=8)
     routing_strategy: Literal["smart", "cost", "quality", "speed", "local"] = "smart"
 

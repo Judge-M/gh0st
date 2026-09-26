@@ -67,7 +67,8 @@ class Gh0stClient:
 
     def execute_turn(self, ticket_id: str) -> WorkerReport:
         return EphemeralWorker(self.ledger, reference_retriever=self.reference_retriever,
-                               secret_resolver=self.secret_resolver).execute_turn(ticket_id)
+                               secret_resolver=self.secret_resolver,
+                               workspace_root=str(self.workspaces.root)).execute_turn(ticket_id)
 
 
 __all__ = ["DispatchResult", "Gh0stClient"]

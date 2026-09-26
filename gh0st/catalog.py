@@ -25,6 +25,7 @@ class ModelTarget(BaseModel):
     pricing_model: str = ""
     input_cost_per_million_usd: float | None = Field(default=None, ge=0)
     output_cost_per_million_usd: float | None = Field(default=None, ge=0)
+    image_generation_cost_usd: float | None = Field(default=None, gt=0)
     placement: ComputePlacement = ComputePlacement.CLOUD_API
 
     @model_validator(mode="after")

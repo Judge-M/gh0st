@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import base64
 
 import pytest
 
@@ -54,6 +55,45 @@ def test_unknown_price_blocks_call_before_provider_request():
     with pytest.raises(UnpricedModelError, match="No price is available"):
         adapter.complete_turn([], None, 100, "openai:unknown", {})
     assert calls == []
+
+
+def test_image_generation_posts_to_secure_configured_provider(monkeypatch):
+    calls = []
+
+    class Client:
+        pass
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"b64_json": base64.b64encode(b"\x89PNG\r\n\x1a\nimage").decode()}]}
+
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        return Response()
+
+    monkeypatch.setattr("httpx.post", post)
+    adapter = AisuiteModelAdapter(
+        client_factory=lambda _config: Client(), secret_resolver=StaticSecrets(),
+    )
+
+    image = adapter.generate_image("A lighthouse", "openai:image-model", {}, max_bytes=100)
+
+    assert image.startswith(b"\x89PNG\r\n\x1a\n")
+    assert calls[0][0] == "https://api.openai.com/v1/images/generations"
+    assert calls[0][1]["headers"]["Authorization"] == "Bearer secret-for-OPENAI_API_KEY"
+    assert calls[0][1]["json"]["response_format"] == "b64_json"
+
+
+def test_image_generation_rejects_non_tls_custom_endpoint(monkeypatch):
+    monkeypatch.setenv("GH0ST_OPENAI_BASE_URL", "http://example.com/v1")
+    adapter = AisuiteModelAdapter(
+        client_factory=lambda _config: SimpleNamespace(), secret_resolver=StaticSecrets(),
+    )
+    with pytest.raises(ValueError, match="HTTPS or a loopback endpoint"):
+        adapter.generate_image("A lighthouse", "openai:image-model", {}, max_bytes=100)
 
 
 def test_fallback_model_uses_its_own_configured_price():

@@ -1,6 +1,7 @@
 """In-process provider calls with explicit pricing and bounded retries."""
 
 from decimal import Decimal
+import base64
 import os
 from typing import Any, Callable, Optional
 
@@ -134,6 +135,49 @@ class AisuiteModelAdapter:
             kwargs["tools"] = [{"type": "function", "function": attached_tool.model_dump()}]
             kwargs["tool_choice"] = "auto"
         return client.chat.completions.create(**kwargs)
+
+    def generate_image(self, prompt: str, model: str, allowance: dict[str, Any],
+                       *, max_bytes: int) -> bytes:
+        provider, model_name = model.split(":", 1) if ":" in model else ("", "")
+        if not provider or not model_name:
+            raise ValueError("Image model target must use provider:model syntax")
+        provider, config = self._provider_config(provider)
+        client = self.client_factory({provider: config})
+        images = getattr(client, "images", None)
+        generate = getattr(images, "generate", None) if images else None
+        if generate is not None:
+            response = generate(model=model_name, prompt=prompt, size="1024x1024", n=1,
+                                response_format="b64_json")
+        elif provider in {"openai", "openrouter"}:
+            base_url = config.get("base_url", "https://api.openai.com/v1").rstrip("/")
+            if not base_url.startswith(("https://", "http://127.0.0.1:", "http://localhost:")):
+                raise ValueError("Image generation API must use HTTPS or a loopback endpoint")
+            if not config.get("api_key"):
+                raise ValueError("The selected image provider has no configured API key")
+            import httpx
+            response = httpx.post(
+                f"{base_url}/images/generations",
+                headers={"Authorization": f"Bearer {config['api_key']}"},
+                json={"model": model_name, "prompt": prompt, "size": "1024x1024", "n": 1,
+                      "response_format": "b64_json"},
+                timeout=120, follow_redirects=False,
+            )
+            response.raise_for_status()
+            response = response.json()
+        else:
+            raise RuntimeError(f"The configured {provider} adapter does not expose image generation")
+        data = response.get("data") if isinstance(response, dict) else getattr(response, "data", None)
+        if not data or len(data) != 1:
+            raise ValueError("Image provider must return exactly one image")
+        item = data[0]
+        encoded = item.get("b64_json") if isinstance(item, dict) else getattr(item, "b64_json", None)
+        if encoded:
+            raw = base64.b64decode(encoded, validate=True)
+        else:
+            raise ValueError("Image provider must return base64 image data")
+        if not raw or len(raw) > max_bytes:
+            raise ValueError("Generated image is empty or exceeds the configured size limit")
+        return raw
 
     def complete_turn(self, messages: list[dict[str, Any]], attached_tool: Optional[ToolSchema],
                       max_tokens: int, model: str,
