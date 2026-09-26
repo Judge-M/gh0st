@@ -37,19 +37,30 @@ class Gh0stClient:
     def dispatch(self, prompt: str, *, source_repo: str | None = None,
                  budget_usd: float = 5.0, budget_tokens: int = 100_000,
                  model: str | None = None, modality: str | None = None,
-                 routing_strategy: str = "smart", task_id: str | None = None) -> DispatchResult:
+                 routing_strategy: str = "smart", task_id: str | None = None,
+                 image_paths: list[str] | None = None) -> DispatchResult:
         if not prompt.strip() or budget_usd <= 0 or budget_tokens < 1:
             raise ValueError("A prompt and positive token and cost budgets are required")
+        image_paths = image_paths or []
+        if image_paths and modality not in {None, "vision"}:
+            raise ValueError("Image inputs require the vision modality")
+        prepared_images = self.workspaces.validate_image_inputs(image_paths)
+        selected_modality = "vision" if prepared_images else modality
         task_id = task_id or f"task_{uuid.uuid4().hex[:12]}"
         if self.ledger.get_task(task_id):
             raise ValueError(f"Task already exists: {task_id}")
         workspace_path, source_commit = self.workspaces.create(task_id, source_repo)
+        image_records = self.workspaces.store_image_inputs(task_id, workspace_path, prepared_images)
+        context_slice = {}
+        if image_records:
+            context_slice = {"image_inputs": image_records}
         self.ledger.create_task(task_id, prompt)
         self.ledger.create_quota_record(QuotaRecord(task_id=task_id,
             max_tokens_budget=budget_tokens, max_cost_usd_budget=budget_usd))
         decision, ticket = System1Router(self.ledger).route(
             prompt, task_id, workspace_path=workspace_path, source_commit=source_commit,
-            model_override=model, modality=modality, routing_strategy=routing_strategy)
+            model_override=model, modality=selected_modality, routing_strategy=routing_strategy,
+            context_slice=context_slice)
         if ticket is None:
             self.ledger.set_task_status(task_id, "halted")
         return DispatchResult(task_id, decision, ticket)

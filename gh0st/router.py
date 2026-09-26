@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from .catalog import ModelCatalog
 from .db import StateLedger
 from .models import ComputePlacement, ExecutionTier, System1Decision, Ticket, ToolSchema
+from .workspace import IMAGE_TOKEN_RESERVE, MAX_IMAGE_COUNT
 
 
 class CapabilityTemplate(BaseModel):
@@ -181,7 +182,13 @@ class System1Router:
         selected_modality = modality or ("code" if matched in {"code_refactor", "unit_testing", "git_ops"} else "text")
         selected_strategy = routing_strategy or os.getenv("GH0ST_ROUTING_STRATEGY", "smart")
         context = context_slice or {}
-        payload_tokens = int(len(tiktoken.get_encoding("cl100k_base").encode(json.dumps({"prompt": prompt, "context": context}))) * 1.2) + 128
+        image_inputs = context.get("image_inputs", [])
+        if (not isinstance(image_inputs, list) or len(image_inputs) > MAX_IMAGE_COUNT
+                or any(not isinstance(item, dict) for item in image_inputs)):
+            return self._halt(prompt, "Ticket image inputs must contain at most eight valid records"), None
+        payload_tokens = (int(len(tiktoken.get_encoding("cl100k_base").encode(
+            json.dumps({"prompt": prompt, "context": context}))) * 1.2) + 128
+            + len(image_inputs) * IMAGE_TOKEN_RESERVE)
         remaining_tokens = min(quota.remaining_tokens, template.default_max_tokens)
         remaining_usd = min(quota.remaining_usd, template.default_max_cost_usd)
         if remaining_tokens <= 0 or remaining_usd <= 0:

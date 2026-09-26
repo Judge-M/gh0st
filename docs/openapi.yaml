@@ -52,6 +52,10 @@ paths:
                 source_repo: {type: string, description: Local repository cloned into a task workspace}
                 model: {type: string, description: Explicit configured model target override}
                 modality: {type: string, enum: [text, code, vision, image]}
+                image_paths:
+                  type: array
+                  maxItems: 8
+                  items: {type: string, description: Local PNG, JPEG, or WebP file path}
                 routing_strategy: {type: string, enum: [smart, cost, quality, speed, local], default: smart}
                 max_budget_usd: {type: number, exclusiveMinimum: 0, default: 5}
                 max_budget_tokens: {type: integer, minimum: 1, default: 100000}

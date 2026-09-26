@@ -134,6 +134,46 @@ def test_public_sdk_dispatches_bounded_ticket(tmp_path, monkeypatch):
     assert result.decision.selected_model == "test-model"
 
 
+def test_vision_dispatch_copies_images_outside_editable_clone(tmp_path, monkeypatch):
+    monkeypatch.setenv("GH0ST_MODEL_CATALOG", json.dumps([{
+        "name": "vision-test", "gateway_model": "vision-test",
+        "modalities": ["text", "code", "vision"], "context_window": 32768,
+        "max_payload_tokens": 16384, "quality": "frontier",
+    }]))
+    source_image = tmp_path / "input.png"
+    source_image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"image payload")
+    client = Gh0stClient(f"sqlite:///{(tmp_path / 'vision.db').as_posix()}",
+                         str(tmp_path / "workspaces"))
+
+    dispatched = client.dispatch("Describe this screenshot", image_paths=[str(source_image)])
+
+    assert dispatched.ticket is not None
+    assert dispatched.decision.selected_model == "vision-test"
+    assert len(dispatched.ticket.context_slice["image_inputs"]) == 1
+    image_record = dispatched.ticket.context_slice["image_inputs"][0]
+    image_path = Path(image_record["path"])
+    assert image_path.is_relative_to(tmp_path / "workspaces" / ".gh0st-inputs")
+    assert not image_path.is_relative_to(dispatched.ticket.workspace_path)
+    assert image_path.read_bytes() == source_image.read_bytes()
+    assert not list(Path(dispatched.ticket.workspace_path).glob("image_*.png"))
+
+    from gh0st.worker import _image_message
+    message = _image_message(dispatched.ticket)
+    assert message["role"] == "user"
+    assert message["content"][1]["type"] == "image_url"
+    assert message["content"][1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_vision_dispatch_rejects_unrecognized_image_content(tmp_path, monkeypatch):
+    source_image = tmp_path / "not-an-image.png"
+    source_image.write_bytes(b"plain text")
+    client = Gh0stClient(f"sqlite:///{(tmp_path / 'invalid-vision.db').as_posix()}",
+                         str(tmp_path / "workspaces"))
+    with pytest.raises(ValueError, match="contents do not match"):
+        client.dispatch("Describe this screenshot", image_paths=[str(source_image)])
+    assert not client.ledger.list_tasks(10)
+
+
 def test_quota_blocks_dispatch(tmp_path, monkeypatch):
     db = ledger(tmp_path, monkeypatch)
     db.update_quota_consumption("task_test", 1000, 0)
@@ -202,6 +242,59 @@ def test_task_list_is_bounded_and_authenticated(tmp_path, monkeypatch):
     assert tasks[0]["task_id"] == "task_second"
     assert tasks[0]["description"] == "Add status view"
     assert client.get("/v1/tasks", params={"limit": 101}, headers=headers).status_code == 422
+
+
+def test_local_api_accepts_task_scoped_vision_image(tmp_path, monkeypatch):
+    monkeypatch.setenv("GH0ST_MODEL_CATALOG", json.dumps([{
+        "name": "api-vision", "gateway_model": "api-vision",
+        "modalities": ["text", "code", "vision"], "context_window": 32768,
+        "max_payload_tokens": 16384, "quality": "frontier",
+    }]))
+    monkeypatch.setattr(Gh0stCLI, "process_queue", lambda *args, **kwargs: None)
+    source_image = tmp_path / "api-input.webp"
+    source_image.write_bytes(b"RIFF" + b"\x00\x00\x00\x00" + b"WEBP" + b"image payload")
+    db = StateLedger(f"sqlite:///{(tmp_path / 'api-vision.db').as_posix()}")
+    db.init_db()
+    client = TestClient(create_app(db, str(tmp_path / "workspaces")))
+
+    response = client.post("/v1/run", json={
+        "prompt": "Describe this screenshot", "image_paths": [str(source_image)],
+    })
+
+    assert response.status_code == 202, response.text
+    ticket = db.get_ticket(response.json()["ticket_id"])
+    assert ticket.context_slice["image_inputs"][0]["media_type"] == "image/webp"
+    assert ticket.gateway_allowance["context_window"] == 32768
+
+
+def test_cli_image_flag_selects_vision_routing(tmp_path, monkeypatch):
+    import sys
+    from gh0st.cli import main
+
+    monkeypatch.setenv("GH0ST_MODEL_CATALOG", json.dumps([{
+        "name": "cli-vision", "gateway_model": "cli-vision",
+        "modalities": ["text", "code", "vision"], "context_window": 32768,
+        "max_payload_tokens": 16384, "quality": "frontier",
+    }]))
+    monkeypatch.setattr(Gh0stCLI, "process_queue",
+                        lambda cli, task_id, *args, **kwargs: cli.db.set_task_status(task_id, "completed"))
+    source_image = tmp_path / "cli-input.jpg"
+    source_image.write_bytes(b"\xff\xd8\xff" + b"image payload")
+    db_url = f"sqlite:///{(tmp_path / 'cli-vision.db').as_posix()}"
+    monkeypatch.setattr(sys, "argv", [
+        "gh0st", "--db-url", db_url, "--workspace-root", str(tmp_path / "workspaces"),
+        "run", "Describe this screenshot", "--image", str(source_image),
+    ])
+
+    with pytest.raises(SystemExit) as result:
+        main()
+
+    assert result.value.code == 0
+    db = StateLedger(db_url)
+    task = db.list_tasks(1)[0]
+    ticket = db.list_task_tickets(task["task_id"])[0]
+    assert ticket.assigned_model == "cli-vision"
+    assert ticket.context_slice["image_inputs"][0]["media_type"] == "image/jpeg"
 
 
 @pytest.mark.skipif(platform.system() != "Linux", reason="Local execution requires Linux")

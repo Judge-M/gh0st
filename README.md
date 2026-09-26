@@ -44,7 +44,7 @@ Model identifiers use `provider:model` (for example `anthropic:claude-3-5-sonnet
 
 For multiple targets, set `GH0ST_MODEL_CATALOG` to a JSON array or the path to one. Each target specifies `name`, `gateway_model`, `modalities`, `context_window`, `max_payload_tokens`, `quality` (`basic` or `frontier`), optional `domains`, `cost_rank`, and `placement`. High-complexity work requires a frontier target unless the operator explicitly uses `--model`. The override still has to satisfy modality and context capacity.
 
-Catalog quality and capacity values are operator-maintained configuration; gh0st does not independently evaluate model quality. The selector can filter vision and image targets, but image attachments and image-generation transport are not implemented in the current worker.
+Catalog quality and capacity values are operator-maintained configuration; gh0st does not independently evaluate model quality. Attach local PNG, JPEG, or WebP files with repeatable `--image` flags, the SDK's `image_paths` argument, or the loopback API's `image_paths` field. Files are copied outside the editable clone into a task-scoped input directory and sent as data URLs to the selected vision model or gateway. Image generation is not yet implemented.
 
 The SQLite ledger defaults to `~/.gh0st/state.db`; task workspaces default to `~/.gh0st/workspaces`. Use `--db-url` and `--workspace-root` before a CLI subcommand, or set `GH0ST_WORKSPACE_ROOT` for the API. `GH0ST_SANDBOX_RUNTIME` may name a trusted Python environment to mount read-only at `/runtime` for tests and linters. The worker never mounts the source checkout or host home into its local command process.
 
@@ -71,6 +71,7 @@ if job.ticket is not None:
 ```
 
 `dispatch` creates a task-scoped clone and ticket; `execute_turn` runs the bounded worker and returns its report. Advanced integrations can import `EphemeralWorker`, `StateLedger`, `System1Router`, and the secret resolver interfaces directly from `gh0st`.
+For a vision request, pass `image_paths=["/path/to/screenshot.png"]` to `dispatch`; this selects vision routing and copies the input alongside (outside) the editable task clone.
 
 ## Memory and retrieved reference material
 
@@ -86,6 +87,7 @@ Pinecone and Qdrant indexes must support text query embedding; Qdrant also requi
 
 ```bash
 gh0st run "Fix the failing parser test" --source-repo /path/to/repo --budget 3.50 --tokens 50000
+gh0st run "Describe this screenshot" --image ./screen.png
 gh0st run "Fix the failing parser test" --source-repo /path/to/repo --model code-target
 gh0st status task_id_from_previous_command
 gh0st resume task_id_from_previous_command

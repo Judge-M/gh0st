@@ -3,11 +3,21 @@
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 from typing import Optional
 
 
 _TASK_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_IMAGE_TYPES = {
+    ".png": ("image/png", b"\x89PNG\r\n\x1a\n"),
+    ".jpg": ("image/jpeg", b"\xff\xd8\xff"),
+    ".jpeg": ("image/jpeg", b"\xff\xd8\xff"),
+    ".webp": ("image/webp", b"RIFF"),
+}
+MAX_IMAGE_COUNT = 8
+MAX_IMAGE_BYTES = 20 * 1024 * 1024
+IMAGE_TOKEN_RESERVE = 4096
 
 
 def _git(*args: str, cwd: Optional[Path] = None) -> str:
@@ -65,3 +75,67 @@ class WorkspaceManager:
             if value:
                 _git("-C", str(target), "config", "--local", key, value)
         return str(target), source_commit
+
+    @staticmethod
+    def validate_image_inputs(image_paths: list[str]) -> list[dict[str, object]]:
+        if len(image_paths) > MAX_IMAGE_COUNT:
+            raise ValueError(f"At most {MAX_IMAGE_COUNT} images can be attached to one task")
+        prepared: list[dict[str, object]] = []
+        total_bytes = 0
+        for image_path in image_paths:
+            source = Path(image_path).expanduser().resolve(strict=True)
+            if not source.is_file():
+                raise ValueError(f"Image input is not a regular file: {image_path}")
+            media = _IMAGE_TYPES.get(source.suffix.lower())
+            if media is None:
+                raise ValueError(f"Unsupported image type for {image_path}; use PNG, JPEG, or WebP")
+            size = source.stat().st_size
+            if size <= 0 or size > MAX_IMAGE_BYTES:
+                raise ValueError(f"Each image must be between 1 byte and {MAX_IMAGE_BYTES} bytes")
+            with source.open("rb") as stream:
+                header = stream.read(12)
+            if not header.startswith(media[1]) or (media[0] == "image/webp" and header[8:12] != b"WEBP"):
+                raise ValueError(f"Image contents do not match the {media[0]} file extension")
+            total_bytes += size
+            if total_bytes > MAX_IMAGE_BYTES:
+                raise ValueError(f"Attached images may not exceed {MAX_IMAGE_BYTES} bytes in total")
+            prepared.append({"source": str(source), "media_type": media[0], "size": size,
+                             "filename": source.name})
+        return prepared
+
+    def store_image_inputs(self, task_id: str, workspace_path: str,
+                           prepared: list[dict[str, object]]) -> list[dict[str, object]]:
+        if not _TASK_ID.fullmatch(task_id):
+            raise ValueError("Task ID must contain only letters, digits, underscores, or hyphens")
+        workspace = Path(workspace_path).resolve(strict=True)
+        if workspace.parent != self.root or workspace.name != task_id:
+            raise ValueError("Image inputs require this task's workspace")
+        if not prepared:
+            return []
+        inputs_root = self.root / ".gh0st-inputs"
+        if inputs_root.is_symlink():
+            raise ValueError("Task image input directory must not be a symlink")
+        inputs_root.mkdir(mode=0o700, exist_ok=True)
+        if inputs_root.resolve() != self.root / ".gh0st-inputs":
+            raise ValueError("Task image input directory is outside the workspace root")
+        task_inputs = inputs_root / task_id
+        task_inputs.mkdir(mode=0o700, exist_ok=False)
+        records = []
+        try:
+            for index, item in enumerate(prepared, start=1):
+                source = Path(str(item["source"])).resolve(strict=True)
+                media_type = str(item["media_type"])
+                extension = ".jpg" if media_type == "image/jpeg" else ".png" if media_type == "image/png" else ".webp"
+                destination = task_inputs / f"image_{index:02d}{extension}"
+                with source.open("rb") as source_stream, destination.open("xb") as target_stream:
+                    shutil.copyfileobj(source_stream, target_stream)
+                try:
+                    os.chmod(destination, 0o600)
+                except OSError:
+                    pass
+                records.append({"path": str(destination), "media_type": media_type,
+                                "filename": str(item["filename"]), "size": int(item["size"])})
+        except Exception:
+            shutil.rmtree(task_inputs)
+            raise
+        return records

@@ -31,6 +31,7 @@ class RunRequest(BaseModel):
     source_repo: Optional[str] = None
     model: Optional[str] = None
     modality: Optional[str] = None
+    image_paths: list[str] = Field(default_factory=list, max_length=8)
     routing_strategy: Literal["smart", "cost", "quality", "speed", "local"] = "smart"
 
 
@@ -80,7 +81,8 @@ def create_app(db: Optional[StateLedger] = None,
                                    budget_tokens=request.max_budget_tokens,
                                    source_repo=request.source_repo, model=request.model,
                                    modality=request.modality,
-                                   routing_strategy=request.routing_strategy)
+                                   routing_strategy=request.routing_strategy,
+                                   image_paths=request.image_paths)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         decision, ticket = dispatch.decision, dispatch.ticket

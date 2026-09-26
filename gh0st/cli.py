@@ -27,13 +27,15 @@ class Gh0stCLI:
                    budget_tokens: int = 100000, gateway_url: Optional[str] = None,
                    source_repo: Optional[str] = None, model: Optional[str] = None,
                    modality: Optional[str] = None,
-                   routing_strategy: Optional[str] = None) -> str:
+                   routing_strategy: Optional[str] = None,
+                   image_paths: Optional[list[Path]] = None) -> str:
         if not prompt.strip() or budget_usd <= 0 or budget_tokens < 1:
             raise ValueError("A prompt and positive budgets are required")
         dispatched = self.client.dispatch(prompt, task_id=task_id, source_repo=source_repo,
                                           budget_usd=budget_usd, budget_tokens=budget_tokens,
                                           model=model, modality=modality,
-                                          routing_strategy=routing_strategy or "smart")
+                                          routing_strategy=routing_strategy or "smart",
+                                          image_paths=[str(path) for path in (image_paths or [])])
         task_id, decision, ticket = dispatched.task_id, dispatched.decision, dispatched.ticket
         print(f"Task {task_id}: {decision.selected_capability} ({decision.confidence_score:.2f})")
         if ticket is None:
@@ -262,6 +264,8 @@ def main() -> None:
     run.add_argument("--source-repo", help="Repository to clone into this task's workspace")
     run.add_argument("--model", help="Explicit model target override")
     run.add_argument("--modality", choices=["text", "code", "vision", "image"])
+    run.add_argument("--image", action="append", type=Path,
+                     help="Attach a PNG, JPEG, or WebP input image (repeatable; selects vision routing)")
     run.add_argument("--routing-strategy", choices=["smart", "cost", "quality", "speed", "local"],
                      help="Select model placement policy; --model overrides this choice")
     chat = commands.add_parser("chat", help="Open an interactive gh0st session")
@@ -315,7 +319,7 @@ def main() -> None:
         if args.command == "run":
             task_id = cli.run_prompt(args.prompt, args.task_id, args.budget_usd, args.budget_tokens,
                                      args.gateway_url, args.source_repo, args.model, args.modality,
-                                     args.routing_strategy)
+                                     args.routing_strategy, args.image)
             sys.exit(0 if cli.db.get_task(task_id).status == "completed" else 1)
         if args.command == "status":
             cli.show_status(args.task_id)
