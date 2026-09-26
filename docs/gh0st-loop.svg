@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="730" viewBox="0 0 1200 730" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="45" y1="30" x2="1158" y2="700" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111426"/><stop offset="1" stop-color="#101B2C"/>
+    </linearGradient>
+    <linearGradient id="violet" x1="230" y1="150" x2="590" y2="330" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A78BFA"/><stop offset="1" stop-color="#7C6CF0"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="100" y1="400" x2="1100" y2="570" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#67E8F9"/><stop offset="1" stop-color="#A78BFA"/>
+    </linearGradient>
+    <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#C4B5FD" fill-opacity=".13"/>
+    </pattern>
+    <marker id="arrowV" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M1 1 7 4.5 1 8" stroke="#A78BFA" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="arrowC" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M1 1 7 4.5 1 8" stroke="#67E8F9" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#050713" flood-opacity=".42"/></filter>
+  </defs>
+
+  <rect width="1200" height="730" rx="28" fill="url(#bg)"/>
+  <rect width="1200" height="730" rx="28" fill="url(#dots)"/>
+  <circle cx="374" cy="219" r="215" fill="#7C3AED" fill-opacity=".10"/>
+  <circle cx="872" cy="530" r="230" fill="#0891B2" fill-opacity=".075"/>
+
+  <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif">
+    <text x="54" y="55" fill="#C4B5FD" font-size="12" font-weight="750" letter-spacing="3">SYSTEM-1 GATEWAY × EPHEMERAL AGENTS</text>
+    <text x="52" y="96" fill="#F8FAFC" font-size="30" font-weight="750" letter-spacing="-.8">The ghost loop</text>
+    <text x="54" y="122" fill="#94A3B8" font-size="14">Route the turn. Wake a ghost. Learn from each tool result. Return evidence. Exit clean.</text>
+
+    <!-- Route a prompt -->
+    <g filter="url(#shadow)">
+      <rect x="52" y="161" width="142" height="122" rx="18" fill="#171B30" stroke="#39415E"/>
+      <rect x="218" y="143" width="373" height="158" rx="20" fill="#1A1931" stroke="#8B78F3" stroke-width="1.5"/>
+      <rect x="615" y="161" width="174" height="122" rx="18" fill="#171B30" stroke="#566082"/>
+      <rect x="813" y="143" width="333" height="158" rx="20" fill="#171B30" stroke="#67E8F9" stroke-width="1.5"/>
+    </g>
+    <g fill="#94A3B8" font-size="10.5" font-weight="750" letter-spacing="1.5">
+      <text x="72" y="188">INPUT</text>
+      <text x="240" y="172" fill="#C4B5FD">SYSTEM-1 · ROUTE + ADMIT</text>
+      <text x="637" y="188">TICKET · SQLITE</text>
+      <text x="835" y="172" fill="#A5F3FC">SPAWN A GHOST</text>
+    </g>
+    <g fill="#F8FAFC" font-size="16" font-weight="700">
+      <text x="72" y="220">CLI · REPL</text>
+      <text x="72" y="245">SDK · API</text>
+      <text x="72" y="270">Browser · IDE</text>
+      <text x="637" y="220">Ticket</text>
+      <text x="637" y="245">Budget reserve</text>
+      <text x="637" y="270">Task lineage</text>
+      <text x="835" y="211">A new process per turn</text>
+    </g>
+    <g font-size="11.5" font-weight="650">
+      <rect x="835" y="231" width="138" height="38" rx="10" fill="#67E8F9" fill-opacity=".10" stroke="#67E8F9" stroke-opacity=".38"/>
+      <text x="851" y="255" fill="#A5F3FC">BOUNDED CONTEXT</text>
+      <rect x="987" y="231" width="137" height="38" rx="10" fill="#67E8F9" fill-opacity=".10" stroke="#67E8F9" stroke-opacity=".38"/>
+      <text x="1005" y="255" fill="#A5F3FC">ONE TOOL SCHEMA</text>
+    </g>
+
+    <!-- System-1 decision dimensions -->
+    <g font-size="11.5" font-weight="650">
+      <rect x="239" y="191" width="151" height="39" rx="9" fill="#A78BFA" fill-opacity=".12" stroke="#A78BFA" stroke-opacity=".35"/>
+      <text x="252" y="207" fill="#DDD6FE">CLASSIFY</text><text x="252" y="222" fill="#A5B4FC" font-size="10.5">Layla default · Jev optional</text>
+      <rect x="402" y="191" width="168" height="39" rx="9" fill="#A78BFA" fill-opacity=".12" stroke="#A78BFA" stroke-opacity=".35"/>
+      <text x="415" y="207" fill="#DDD6FE">PLACE MODEL</text><text x="415" y="222" fill="#A5B4FC" font-size="10.5">Strategy · fit · capability</text>
+      <rect x="239" y="241" width="151" height="39" rx="9" fill="#A78BFA" fill-opacity=".12" stroke="#A78BFA" stroke-opacity=".35"/>
+      <text x="252" y="257" fill="#DDD6FE">PRUNE TO ONE</text><text x="252" y="272" fill="#A5B4FC" font-size="10.5">Task-specific tool schema</text>
+      <rect x="402" y="241" width="168" height="39" rx="9" fill="#A78BFA" fill-opacity=".12" stroke="#A78BFA" stroke-opacity=".35"/>
+      <text x="415" y="257" fill="#DDD6FE">CHECK ALLOWANCE</text><text x="415" y="272" fill="#A5B4FC" font-size="10.5">Context · tokens · dollars</text>
+    </g>
+    <path d="M194 222h19" stroke="#A78BFA" stroke-width="2" marker-end="url(#arrowV)"/>
+    <path d="M591 222h20" stroke="#A78BFA" stroke-width="2" marker-end="url(#arrowV)"/>
+    <path d="M789 222h20" stroke="#67E8F9" stroke-width="2" marker-end="url(#arrowC)"/>
+
+    <!-- One ghost's ReAct loop -->
+    <rect x="52" y="343" width="1094" height="218" rx="23" fill="#121A2B" stroke="url(#cyan)" stroke-width="1.5"/>
+    <rect x="73" y="360" width="144" height="24" rx="12" fill="#67E8F9" fill-opacity=".13"/>
+    <text x="89" y="376" fill="#A5F3FC" font-size="10.5" font-weight="750" letter-spacing="1.5">ONE GHOST · REACT</text>
+    <text x="836" y="377" fill="#94A3B8" font-size="11">Short-lived worker · no long-running agent state</text>
+
+    <g filter="url(#shadow)">
+      <rect x="80" y="407" width="197" height="101" rx="15" fill="#1A1931" stroke="#8B78F3" stroke-opacity=".65"/>
+      <rect x="324" y="407" width="264" height="101" rx="15" fill="#172333" stroke="#67E8F9" stroke-opacity=".55"/>
+      <rect x="635" y="407" width="208" height="101" rx="15" fill="#172333" stroke="#67E8F9" stroke-opacity=".55"/>
+      <rect x="890" y="407" width="222" height="101" rx="15" fill="#1A1931" stroke="#A78BFA" stroke-opacity=".65"/>
+    </g>
+    <g font-size="11" font-weight="750" letter-spacing="1.1">
+      <text x="99" y="432" fill="#C4B5FD">TICKET PROMPT</text>
+      <text x="343" y="432" fill="#A5F3FC">MODEL COMPLETION</text>
+      <text x="654" y="432" fill="#A5F3FC">ONE TOOL CALL</text>
+      <text x="909" y="432" fill="#C4B5FD">OBSERVE + REACT</text>
+    </g>
+    <g fill="#E2E8F0" font-size="13" font-weight="550">
+      <text x="99" y="460">Objective + context slice</text>
+      <text x="99" y="483" fill="#94A3B8" font-size="11">Optional bounded chat history</text>
+      <text x="343" y="460">Selected provider / model</text>
+      <text x="343" y="483" fill="#94A3B8" font-size="11">In-process adapter or compatible gateway</text>
+      <text x="654" y="460">Inspect · edit · test</text>
+      <text x="654" y="483" fill="#94A3B8" font-size="11">Only inside the task clone</text>
+      <text x="909" y="460">Append tool result</text>
+      <text x="909" y="483" fill="#94A3B8" font-size="11">Next model call, within turn caps</text>
+    </g>
+    <path d="M277 457h39" stroke="#A78BFA" stroke-width="2" marker-end="url(#arrowV)"/>
+    <path d="M588 457h39" stroke="#67E8F9" stroke-width="2" marker-end="url(#arrowC)"/>
+    <path d="M843 457h39" stroke="#67E8F9" stroke-width="2" marker-end="url(#arrowC)"/>
+    <path d="M1001 509c-70 42-370 43-405 0" stroke="#A78BFA" stroke-width="1.8" stroke-dasharray="5 5" marker-end="url(#arrowV)"/>
+    <text x="647" y="542" fill="#A5B4FC" font-size="10.5" font-weight="650">TOOL RESULT FEEDS THE NEXT COMPLETION</text>
+
+    <!-- Durable report and operator gate -->
+    <path d="M427 561v24" stroke="#A78BFA" stroke-opacity=".9" stroke-width="1.7" marker-end="url(#arrowV)"/>
+    <path d="M953 561v24" stroke="#FBBF24" stroke-opacity=".8" stroke-width="1.7" stroke-dasharray="4 4"/>
+    <rect x="52" y="592" width="685" height="82" rx="17" fill="#171B30" stroke="#566082"/>
+    <rect x="761" y="592" width="385" height="82" rx="17" fill="#211D2D" stroke="#FBBF24" stroke-opacity=".55"/>
+    <text x="76" y="619" fill="#C4B5FD" font-size="10.5" font-weight="750" letter-spacing="1.4">REPORT SAVED · WORKER EXITS</text>
+    <text x="76" y="646" fill="#F8FAFC" font-size="14" font-weight="650">Diff · commands · tests · usage · unresolved failures → ledger</text>
+    <circle cx="790" cy="633" r="12" fill="#FBBF24" fill-opacity=".14" stroke="#FBBF24" stroke-opacity=".7"/>
+    <path d="M790 626v7m0 4v.5" stroke="#FCD34D" stroke-width="2" stroke-linecap="round"/>
+    <text x="814" y="619" fill="#FDE68A" font-size="10.5" font-weight="750" letter-spacing="1.2">EXTERNAL ACTION?</text>
+    <text x="814" y="643" fill="#CBD5E1" font-size="12">Request a human grant. Record the decision.</text>
+    <text x="814" y="661" fill="#94A3B8" font-size="10.5">The grant does not itself run the action.</text>
+  </g>
+</svg>

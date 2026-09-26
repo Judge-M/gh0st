@@ -39,17 +39,17 @@
     <path d="M16 89h13m-6.5-6.5v13m190 42h16m-8-8v16" stroke="#A78BFA" stroke-width="2" stroke-linecap="round"/>
   </g>
   <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif">
-    <text x="440" y="119" fill="#C4B5FD" font-size="13" font-weight="700" letter-spacing="4">LOCAL-FIRST · TASK-SCOPED · VERIFIABLE</text>
+    <text x="440" y="119" fill="#C4B5FD" font-size="13" font-weight="700" letter-spacing="3">SYSTEM-1 ROUTING · EPHEMERAL WORKERS · PYTHON SDK</text>
     <text x="436" y="199" fill="#F8FAFC" font-size="68" font-weight="750" letter-spacing="-3">gh0st</text>
-    <text x="442" y="237" fill="#CBD5E1" font-size="19" font-weight="450">A safe workbench for AI-assisted development.</text>
+    <text x="442" y="237" fill="#CBD5E1" font-size="19" font-weight="450">A fresh agent for every turn. One intelligent gateway.</text>
   </g>
   <g font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="13" font-weight="600">
-    <rect x="440" y="268" width="126" height="34" rx="17" fill="#A78BFA" fill-opacity=".13" stroke="#A78BFA" stroke-opacity=".5"/>
-    <text x="461" y="290" fill="#DDD6FE">ISOLATED WORK</text>
-    <rect x="578" y="268" width="136" height="34" rx="17" fill="#67E8F9" fill-opacity=".09" stroke="#67E8F9" stroke-opacity=".4"/>
-    <text x="597" y="290" fill="#A5F3FC">TESTED RESULTS</text>
-    <rect x="726" y="268" width="162" height="34" rx="17" fill="#A78BFA" fill-opacity=".10" stroke="#A78BFA" stroke-opacity=".38"/>
-    <text x="746" y="290" fill="#DDD6FE">HUMAN CONTROL</text>
+    <rect x="440" y="268" width="158" height="34" rx="17" fill="#A78BFA" fill-opacity=".13" stroke="#A78BFA" stroke-opacity=".5"/>
+    <text x="457" y="290" fill="#DDD6FE">FRESH WORKER</text>
+    <rect x="610" y="268" width="156" height="34" rx="17" fill="#67E8F9" fill-opacity=".09" stroke="#67E8F9" stroke-opacity=".4"/>
+    <text x="627" y="290" fill="#A5F3FC">LEAN CONTEXT</text>
+    <rect x="778" y="268" width="180" height="34" rx="17" fill="#A78BFA" fill-opacity=".10" stroke="#A78BFA" stroke-opacity=".38"/>
+    <text x="795" y="290" fill="#DDD6FE">MODEL ROUTING</text>
   </g>
   <g fill="url(#line)" opacity=".8">
     <circle cx="961" cy="107" r="2"/><circle cx="1002" cy="127" r="2"/><circle cx="1044" cy="97" r="2"/>
