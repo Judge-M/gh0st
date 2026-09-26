@@ -43,6 +43,11 @@ class Gh0stCLI:
             print(decision.reasoning_summary, file=sys.stderr)
             return task_id
 
+        memory_targets = ["SQLite rules", *ticket.memory_route.reference_providers]
+        print(f"[System-1 OAG] Model: {ticket.assigned_model} | "
+              f"Tool: {ticket.attached_tool_schema.name} | "
+              f"Memory: {' + '.join(memory_targets)}")
+
         self.process_queue(task_id, gateway_url)
         return task_id
 

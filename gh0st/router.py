@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from .catalog import ModelCatalog
 from .db import StateLedger
 from .models import ComputePlacement, ExecutionTier, System1Decision, Ticket, ToolSchema
+from .reference import select_memory_route
 from .workspace import MAX_IMAGE_COUNT
 
 
@@ -141,7 +142,8 @@ class JevClassifier(EndpointClassifier):
 
 class System1Router:
     def __init__(self, db: StateLedger, classifier: Optional[System1Classifier] = None,
-                 registry: Optional[TemplateRegistry] = None, catalog: Optional[ModelCatalog] = None):
+                 registry: Optional[TemplateRegistry] = None, catalog: Optional[ModelCatalog] = None,
+                 reference_provider_names: Optional[list[str]] = None):
         self.db = db
         if classifier is None:
             selected = os.getenv("GH0ST_ROUTER_MODEL", "layla").casefold()
@@ -157,6 +159,7 @@ class System1Router:
         self.classifier = classifier
         self.registry = registry or TemplateRegistry()
         self.catalog = catalog or ModelCatalog.from_environment()
+        self.reference_provider_names = reference_provider_names
 
     def route(self, prompt: str, task_id: str, parent_ticket_id: Optional[str] = None,
               depth: int = 0, capability: Optional[str] = None,
@@ -217,6 +220,7 @@ class System1Router:
         if remaining_tokens <= 0 or remaining_usd <= 0:
             return self._halt(prompt, "Insufficient task budget"), None
         try:
+            memory_route = select_memory_route(prompt, matched, self.reference_provider_names)
             target = self.catalog.select(selected_modality, payload_tokens,
                                          min(remaining_tokens, 1024), matched, tier, model_override,
                                          selected_strategy)
@@ -247,6 +251,7 @@ class System1Router:
             assigned_model=target.gateway_model,
             routing_strategy=selected_strategy,
             attached_tool_schema=template.default_tool_schema,
+            memory_route=memory_route,
             max_tokens_allocated=remaining_tokens, max_cost_usd=remaining_usd,
         )
         try:
@@ -259,9 +264,12 @@ class System1Router:
             selected_routing_strategy=selected_strategy,
             execution_tier=tier, compute_placement=target.placement,
             attached_tool_schema=template.default_tool_schema,
+            memory_route=memory_route,
             requires_planner=matched == "planner",
-            reasoning_summary=(f"Selected {matched} and {target.name} using {selected_strategy} routing "
-                               f"with {confidence:.2f} confidence"),
+            reasoning_summary=(f"OAG selected {matched}, model {target.name}, tool "
+                               f"{template.default_tool_schema.name}, and memory providers "
+                               f"{memory_route.reference_providers or ['SQLite rules only']} "
+                               f"using {selected_strategy} routing with {confidence:.2f} confidence"),
         ), ticket
 
     @staticmethod

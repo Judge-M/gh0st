@@ -5,10 +5,33 @@ the current worker prompt as reference data and must not be treated as policy.
 """
 
 from abc import ABC, abstractmethod
+import json
 import os
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from .models import MemoryRoute
+
+
+_PROVIDER_NAMES = {"mem0", "pinecone", "qdrant"}
+_ONTOLOGY_TERMS = {
+    "codebase": ("code", "repo", "repository", "source", "function", "module", "bug", "refactor", "implementation"),
+    "testing": ("test", "tests", "pytest", "coverage", "lint", "assertion"),
+    "documentation": ("doc", "docs", "documentation", "readme", "guide", "manual", "reference"),
+    "architecture": ("architecture", "architectural", "design", "component", "diagram", "system"),
+    "operations": ("deploy", "deployment", "release", "build", "ci", "pipeline", "workflow", "configuration"),
+    "planning": ("plan", "planning", "roadmap", "milestone", "decompose"),
+    "project_memory": ("earlier", "previously", "remember", "preference", "decision", "we decided", "project context"),
+}
+_CAPABILITY_DOMAINS = {
+    "code_refactor": ("codebase", "project_memory"),
+    "unit_testing": ("testing", "codebase", "project_memory"),
+    "git_ops": ("codebase", "operations", "project_memory"),
+    "planner": ("planning", "project_memory"),
+    "image_generation": (),
+}
 
 
 class ReferenceHit(BaseModel):
@@ -24,6 +47,81 @@ class ReferenceRetriever(ABC):
     @abstractmethod
     def retrieve(self, query: str, limit: int = 5) -> list[ReferenceHit]:
         """Return relevant unverified text without persisting it in gh0st."""
+
+
+def ontology_domains(prompt: str, capability: str) -> list[str]:
+    """Walk the local OAG memory taxonomy for the routed capability and prompt."""
+    if capability == "image_generation":
+        return []
+    domains = set(_CAPABILITY_DOMAINS.get(capability, ()))
+    value = prompt.casefold()
+    for domain, terms in _ONTOLOGY_TERMS.items():
+        if any(re.search(r"\b" + re.escape(term) + r"\b", value) for term in terms):
+            domains.add(domain)
+    if not domains:
+        domains.add("general")
+    return sorted(domains)
+
+
+def _provider_route_config() -> dict[str, list[str]] | None:
+    raw = os.getenv("GH0ST_MEMORY_ONTOLOGY_ROUTES", "").strip()
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("GH0ST_MEMORY_ONTOLOGY_ROUTES must be a JSON object") from exc
+    if not isinstance(value, dict):
+        raise ValueError("GH0ST_MEMORY_ONTOLOGY_ROUTES must be a JSON object")
+    valid_domains = set(_ONTOLOGY_TERMS) | {"general", "default"}
+    routes: dict[str, list[str]] = {}
+    for domain, configured in value.items():
+        key = str(domain).casefold()
+        if key not in valid_domains:
+            raise ValueError(f"Unknown memory ontology domain: {domain}")
+        names = [configured] if isinstance(configured, str) else configured
+        if not isinstance(names, list) or any(not isinstance(item, str) for item in names):
+            raise ValueError(f"Memory routes for {domain} must be a provider name or list of names")
+        normalized = [item.strip().casefold() for item in names if item.strip()]
+        if any(name not in _PROVIDER_NAMES for name in normalized):
+            raise ValueError(f"Memory routes for {domain} support mem0, pinecone, and qdrant providers")
+        routes[key] = sorted(set(normalized))
+    return routes
+
+
+def _provider_names_from_environment() -> list[str]:
+    raw = os.getenv("GH0ST_REFERENCE_PROVIDERS", "") or os.getenv("GH0ST_REFERENCE_PROVIDER", "")
+    names = [name.strip().casefold() for name in raw.split(",") if name.strip()]
+    if any(name not in _PROVIDER_NAMES for name in names):
+        raise ValueError("Reference providers must be mem0, pinecone, or qdrant")
+    return list(dict.fromkeys(names))
+
+
+def select_memory_route(prompt: str, capability: str,
+                        available_providers: list[str] | None = None) -> MemoryRoute:
+    """Select trusted local rules and ontology-matched external reference adapters."""
+    domains = ontology_domains(prompt, capability)
+    if capability == "image_generation":
+        return MemoryRoute(system_rules=True, ontology_domains=domains, reference_providers=[])
+
+    routes = _provider_route_config()
+    if routes is not None:
+        selected: set[str] = set(routes.get("default", []))
+        for domain in domains:
+            selected.update(routes.get(domain, []))
+        return MemoryRoute(system_rules=True, ontology_domains=domains,
+                           reference_providers=sorted(selected))
+
+    names = available_providers if available_providers is not None else _provider_names_from_environment()
+    normalized = list(dict.fromkeys(name.strip().casefold() for name in names if name.strip()))
+    if any(name not in _PROVIDER_NAMES for name in normalized):
+        raise ValueError("Reference providers must be mem0, pinecone, or qdrant")
+    if len(normalized) > 1:
+        raise ValueError("Configure GH0ST_MEMORY_ONTOLOGY_ROUTES to route between multiple memory providers")
+    # Backwards compatibility: a single configured adapter remains the default
+    # for all eligible turns; multiple adapters require explicit OAG routes.
+    return MemoryRoute(system_rules=True, ontology_domains=domains,
+                       reference_providers=normalized)
 
 
 def _field(value: Any, key: str, default: Any = None) -> Any:
@@ -127,14 +225,22 @@ class QdrantRetriever(ReferenceRetriever):
         return hits
 
 
+def configured_retrievers(provider_names: list[str]) -> dict[str, ReferenceRetriever]:
+    retrievers: dict[str, ReferenceRetriever] = {}
+    factories = {"mem0": Mem0Retriever, "pinecone": PineconeRetriever, "qdrant": QdrantRetriever}
+    for name in provider_names:
+        key = name.casefold()
+        if key not in factories:
+            raise ValueError(f"Unsupported reference provider: {name}")
+        retrievers[key] = factories[key]()
+    return retrievers
+
+
 def configured_retriever() -> ReferenceRetriever | None:
-    provider = os.getenv("GH0ST_REFERENCE_PROVIDER", "").casefold()
-    if not provider:
+    """Compatibility helper for callers using the original single-provider setting."""
+    names = _provider_names_from_environment()
+    if not names:
         return None
-    if provider == "mem0":
-        return Mem0Retriever()
-    if provider == "pinecone":
-        return PineconeRetriever()
-    if provider == "qdrant":
-        return QdrantRetriever()
-    raise ValueError("GH0ST_REFERENCE_PROVIDER must be mem0, pinecone, or qdrant")
+    if len(names) != 1:
+        raise ValueError("Use configured_retrievers with OAG-selected providers")
+    return configured_retrievers(names)[names[0]]
