@@ -1,0 +1,43 @@
+name: Client release gates
+
+on:
+  push:
+    branches: [main, "milestone*"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: client-release-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  clients:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Install pnpm
+        run: npm install --global pnpm@11.19.0
+      - name: Install mobile dependencies
+        working-directory: interfaces/mobile
+        run: pnpm install --frozen-lockfile
+      - name: Type-check mobile app
+        working-directory: interfaces/mobile
+        run: pnpm typecheck
+      - name: Test mobile pairing encryption
+        working-directory: interfaces/mobile
+        run: pnpm test:crypto
+      - name: Install desktop dependencies
+        working-directory: interfaces/tauri
+        run: pnpm install --frozen-lockfile
+      - name: Test desktop control flows
+        working-directory: interfaces/tauri
+        run: pnpm test
+      - name: Test VS Code extension control flows
+        run: node interfaces/vscode/test/extension.test.js
