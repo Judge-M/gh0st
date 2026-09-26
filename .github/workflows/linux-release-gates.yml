@@ -44,37 +44,37 @@ jobs:
           mkdir -p "$wrapper_dir"
           cat > "$wrapper_dir/bwrap" <<'EOF'
           #!/bin/bash
-          set -eu
-          uid="$(id -u)"
-          gid="$(id -g)"
-          found_netns=false
+          set -euo pipefail
+          found_userns=0
+          found_netns=0
           args=()
           for arg in "$@"; do
-            args+=("$arg")
-            if [[ "$arg" == "--unshare-net" ]]; then
-              args+=("--share-net")
-              found_netns=true
-            fi
+            case "$arg" in
+              --unshare-user) found_userns=1 ;;
+              --unshare-net)
+                args+=("--unshare-net" "--share-net")
+                found_netns=1
+                ;;
+              *) args+=("$arg") ;;
+            esac
           done
-          if [[ "$found_netns" != true ]]; then
-            echo "bubblewrap command did not request network isolation" >&2
+          if [[ "$found_userns" != 1 || "$found_netns" != 1 ]]; then
+            echo "bubblewrap command did not request user and network isolation" >&2
             exit 2
           fi
-          namespace="gh0st-ci-$$-$RANDOM"
-          cleanup() {
-            sudo -n ip netns delete "$namespace" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-          sudo -n ip netns add "$namespace"
-          sudo -n ip -n "$namespace" link set lo up
-          if sudo -n nsenter --net="/run/netns/$namespace" -- \
-            /usr/bin/setpriv --regid="$gid" --reuid="$uid" --clear-groups \
-            /usr/bin/bwrap "${args[@]}"; then
-            status=0
-          else
-            status=$?
-          fi
-          exit "$status"
+          exec /usr/bin/unshare --user --map-root-user --net --fork \
+            /bin/bash -eu -c '
+              /usr/sbin/ip link set lo up
+              exec {userns_fd}< /proc/self/ns/user
+              sandbox_args=()
+              for arg in "$@"; do
+                if [[ "$arg" == "--" ]]; then
+                  sandbox_args+=(--userns "$userns_fd" --cap-drop ALL)
+                fi
+                sandbox_args+=("$arg")
+              done
+              exec /usr/bin/bwrap "${sandbox_args[@]}"
+            ' gh0st-bwrap "${args[@]}"
           EOF
           chmod +x "$wrapper_dir/bwrap"
           echo "$wrapper_dir" >> "$GITHUB_PATH"
