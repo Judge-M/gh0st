@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import threading
 import uuid
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -17,8 +17,8 @@ from websockets.exceptions import ConnectionClosed
 
 from .cli import Gh0stCLI
 from .db import StateLedger
-from .models import QuotaRecord, TicketStatus
-from .router import System1Router
+from .models import TicketStatus
+from .sdk import Gh0stClient
 from .workspace import WorkspaceManager
 from .relay_crypto import PairCipher
 
@@ -31,6 +31,7 @@ class RunRequest(BaseModel):
     source_repo: Optional[str] = None
     model: Optional[str] = None
     modality: Optional[str] = None
+    routing_strategy: Literal["smart", "cost", "quality", "speed", "local"] = "smart"
 
 
 class GrantDecision(BaseModel):
@@ -45,6 +46,7 @@ def create_app(db: Optional[StateLedger] = None,
     app = FastAPI(title="gh0st Control API", version="0.1.0")
     api_token = os.getenv("GH0ST_API_TOKEN", "")
     workspaces = WorkspaceManager(workspace_root)
+    sdk = Gh0stClient(ledger.db_url, str(workspaces.root))
 
     def authorize(authorization: Optional[str]) -> None:
         if api_token and authorization != f"Bearer {api_token}":
@@ -73,19 +75,16 @@ def create_app(db: Optional[StateLedger] = None,
         if ledger.get_task(task_id):
             raise HTTPException(status_code=409, detail="Task already exists")
         try:
-            workspace_path, source_commit = workspaces.create(task_id, request.source_repo)
+            dispatch = sdk.dispatch(request.prompt, task_id=task_id,
+                                   budget_usd=request.max_budget_usd,
+                                   budget_tokens=request.max_budget_tokens,
+                                   source_repo=request.source_repo, model=request.model,
+                                   modality=request.modality,
+                                   routing_strategy=request.routing_strategy)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        ledger.create_task(task_id, request.prompt)
-        ledger.create_quota_record(QuotaRecord(task_id=task_id,
-            max_tokens_budget=request.max_budget_tokens, max_cost_usd_budget=request.max_budget_usd))
-        decision, ticket = System1Router(ledger).route(
-            request.prompt, task_id, workspace_path=workspace_path,
-            source_commit=source_commit, model_override=request.model,
-            modality=request.modality,
-        )
+        decision, ticket = dispatch.decision, dispatch.ticket
         if ticket is None:
-            ledger.set_task_status(task_id, "halted")
             raise HTTPException(status_code=422, detail=decision.reasoning_summary)
         thread = threading.Thread(target=Gh0stCLI(ledger.db_url, str(workspaces.root)).process_queue,
                                   args=(task_id,), daemon=True)
@@ -93,6 +92,7 @@ def create_app(db: Optional[StateLedger] = None,
         return {"task_id": task_id, "status": "dispatched", "ticket_id": ticket.ticket_id,
                 "decision": {"selected_capability": decision.selected_capability,
                              "selected_model": decision.selected_model,
+                             "selected_routing_strategy": decision.selected_routing_strategy,
                              "confidence_score": decision.confidence_score,
                              "execution_tier": decision.execution_tier.value,
                              "compute_placement": decision.compute_placement.value,

@@ -1,6 +1,6 @@
 # gh0st
 
-An ephemeral, task-scoped runtime with local routing, a SQLite state ledger, and an OpenAI-compatible model gateway.
+An ephemeral, task-scoped execution SDK and CLI with local routing, an SQLite state ledger, and in-process model-provider adapters.
 
 **Project:** [Judge-M/gh0st](https://github.com/Judge-M/gh0st)
 
@@ -9,42 +9,78 @@ An ephemeral, task-scoped runtime with local routing, a SQLite state ledger, and
 ## Current implementation
 
 - Each repository task runs against a separate local clone at a recorded source commit. The clone has independent Git objects and no configured remote. Scratch tasks receive an empty task repository.
-- System-1 selects a capability and model from configured modality, context capacity, domain, quality, and optional `--model` override. Layla is the local keyword classifier; Jev is an optional classifier endpoint.
+- The `gh0st-core` Python distribution provides the importable SDK and the `gh0st`, `gh0st-broker`, and `gh0st-relay` entry points. Layla is the local keyword classifier; Jev is an optional classifier endpoint.
+- System-1 supports `smart`, `cost`, `quality`, `speed`, and `local` routing policies. It considers capability, modality, domain, quality floor, context and payload capacity, latency, and configured price. `--model` selects a fixed model ahead of the policy.
 - A ticket carries workspace path, source commit, permitted local capabilities, gateway allowance, model, and token/USD allocations. Admission reserves quota atomically; the dispatcher claims a pending ticket atomically before launching its worker.
-- A worker may run local shell commands only through Linux bubblewrap. The task clone is its only persistent writable mount; `/tmp` is temporary, system runtime directories are read-only, and the command has no network namespace access. The controller makes the authorized model gateway calls outside that boundary.
-- The worker can iterate through edits and tests, then records commands, test results, a diff, unresolved failures, usage, and a final status. A gateway `402` or `429` halts the ticket.
+- A worker may run local shell commands only through Linux bubblewrap. The task clone is its only persistent writable mount; `/tmp` is temporary, system runtime directories are read-only, and the command has no network namespace access. Model requests run in-process through aisuite outside that shell boundary; an OpenAI-compatible gateway remains an explicit option.
+- The worker can iterate through edits and tests, then records commands, test results, a diff, unresolved failures, usage, and a final status. A provider or gateway `402` or `429` halts the ticket.
 - Running tickets hold a five-minute claim lease renewed by the worker. A dead child is halted immediately; after an unobserved controller crash, `gh0st resume TASK_ID` recovers an expired claim. Recovery records a halted report and never replays the worker automatically.
-- External pushes, production writes, and non-gateway network actions are grant requests in the ledger. An operator can approve or reject a request locally; this release does not execute external actions after approval.
+- External pushes, production writes, and non-gateway network actions are grant requests in the ledger. An operator can approve or reject a request locally; external actions remain gated.
 - A self-hosted WebSocket broker routes opaque encrypted frames. One-time pairing URIs carry a 256-bit secret that stays on the daemon and mobile client. Paired clients can read task status, submit bounded task requests, and record grant decisions; the broker does not see those payloads. Pair offers expire after five minutes. Paired phones reconnect using a credential in OS secure storage; operators can list and revoke pairings locally.
 - The CLI, loopback API, browser dashboard, VS Code extension, Tauri desktop app, and mobile pairing client provide control surfaces. Remaining release work includes OS push delivery, a hosted broker deployment, physical mobile reconnect/revocation validation, and publishing signed desktop/mobile packages.
 
 ## Requirements
 
 - Linux with Python 3.12+, Git, and `bubblewrap` (`bwrap`) available on `PATH` for local action execution
-- A configured OpenAI-compatible `/chat/completions` gateway, such as LiteLLM Proxy or OpenRouter
-- A gateway response with `usage.total_tokens` and `usage.cost_usd` (or top-level `cost_usd`) for every completion
+- A supported aisuite provider and a configured model with known pricing; unknown prices are blocked unless explicit per-model rates are configured
 - `cryptography` for encrypted relay pairing; the mobile client uses `@noble/ciphers` and `@noble/hashes`
 
 ```bash
-python -m pip install -e .
+python -m pip install ".[openai]"
+# Or select another provider: ".[anthropic]", ".[google]", or ".[ollama]"
 ```
 
 Configure a model with known capacity and quality. The simple single-model setup is:
 
 ```bash
-export GH0ST_GATEWAY_URL=http://127.0.0.1:4000/v1
-export GH0ST_DEFAULT_MODEL=your-litellm-model-alias
+export OPENAI_API_KEY=your-provider-key
+export GH0ST_DEFAULT_MODEL=openai:gpt-4o-mini
 export GH0ST_DEFAULT_MODEL_CONTEXT=128000
 export GH0ST_DEFAULT_MODEL_PAYLOAD=100000
 export GH0ST_DEFAULT_MODEL_QUALITY=frontier
-export GH0ST_GATEWAY_API_KEY=your-gateway-key
 ```
+
+Model identifiers use `provider:model` (for example `anthropic:claude-3-5-sonnet` or `openrouter:deepseek/deepseek-r1`). Provider secrets can come from environment variables, files, HashiCorp Vault, or 1Password Connect. Set `GH0ST_SECRETS_PROVIDER` to `env`, `file`, `vault`, or `onepassword` and configure that resolver's environment. Install `gh0st-core[onepassword]` for the 1Password Connect SDK. `--gateway-url` opts into an OpenAI-compatible gateway; aisuite direct calls are the default.
 
 For multiple targets, set `GH0ST_MODEL_CATALOG` to a JSON array or the path to one. Each target specifies `name`, `gateway_model`, `modalities`, `context_window`, `max_payload_tokens`, `quality` (`basic` or `frontier`), optional `domains`, `cost_rank`, and `placement`. High-complexity work requires a frontier target unless the operator explicitly uses `--model`. The override still has to satisfy modality and context capacity.
 
 Catalog quality and capacity values are operator-maintained configuration; gh0st does not independently evaluate model quality. The selector can filter vision and image targets, but image attachments and image-generation transport are not implemented in the current worker.
 
 The SQLite ledger defaults to `~/.gh0st/state.db`; task workspaces default to `~/.gh0st/workspaces`. Use `--db-url` and `--workspace-root` before a CLI subcommand, or set `GH0ST_WORKSPACE_ROOT` for the API. `GH0ST_SANDBOX_RUNTIME` may name a trusted Python environment to mount read-only at `/runtime` for tests and linters. The worker never mounts the source checkout or host home into its local command process.
+
+## Python SDK
+
+```python
+from gh0st import Gh0stClient, VaultSecretResolver
+
+client = Gh0stClient(
+    db_url="sqlite:///workspace.db",
+    workspace_root="./gh0st-workspaces",
+    secret_resolver=VaultSecretResolver(),
+)
+job = client.dispatch(
+    "Refactor the auth middleware and run its tests",
+    source_repo="/path/to/auth-service",
+    budget_usd=5.00,
+    budget_tokens=100_000,
+    routing_strategy="smart",
+)
+if job.ticket is not None:
+    report = client.execute_turn(job.ticket.ticket_id)
+    print(report.status, report.diff, report.test_results)
+```
+
+`dispatch` creates a task-scoped clone and ticket; `execute_turn` runs the bounded worker and returns its report. Advanced integrations can import `EphemeralWorker`, `StateLedger`, `System1Router`, and the secret resolver interfaces directly from `gh0st`.
+
+## Memory and retrieved reference material
+
+Human-approved governance claims in the SQLite ledger are injected as **System Instructions / Constraints**. External retrieval results are a separate, unverified context channel and are not copied into SQLite or treated as instructions. Optional adapters are available with `pip install ".[mem0]"`, `pip install ".[pinecone]"`, or `pip install ".[qdrant]"`. Choose one with `GH0ST_REFERENCE_PROVIDER=mem0|pinecone|qdrant`:
+
+- Mem0: `MEM0_API_KEY` and a tenant/project-specific `GH0ST_MEM0_USER_ID` are required.
+- Pinecone: set `PINECONE_API_KEY` and `GH0ST_PINECONE_INDEX`; optionally set `GH0ST_PINECONE_NAMESPACE` and `GH0ST_PINECONE_TEXT_FIELD`.
+- Qdrant: set `GH0ST_QDRANT_COLLECTION`; optionally set `GH0ST_QDRANT_URL` (default `http://localhost:6333`), `QDRANT_API_KEY`, `GH0ST_QDRANT_TEXT_FIELD`, and `GH0ST_QDRANT_VECTOR_NAME`.
+
+Pinecone and Qdrant indexes must support text query embedding; Qdrant also requires a collection configured for text queries. `GH0ST_REFERENCE_LIMIT` caps results at 20 and `GH0ST_REFERENCE_MAX_CHARS` bounds the transient text injected into one ticket. Retrieved text is labeled with its provider and passed only to the current ticket.
 
 ## CLI
 
@@ -91,9 +127,9 @@ curl -X POST http://127.0.0.1:8383/v1/run \
 
 ## Budget behavior
 
-gh0st reserves ticket allocations before dispatch and limits each gateway call by the ticket's remaining token allocation and selected model context window. Reports charge gateway-reported usage in the same transaction that updates ticket status and releases the reservation. Missing or invalid usage fails the ticket. A gateway `402` or `429` produces a halted report. Configure key-level hard USD limits in the gateway: gh0st can record and stop after reported usage, but it cannot prevent a provider from charging for an already completed call.
+gh0st reserves ticket allocations before dispatch and limits each model call by the ticket's remaining token allocation and selected model context window. Reports charge provider- or gateway-reported usage in the same transaction that updates ticket status and releases the reservation. Missing or invalid usage fails the ticket. A provider or gateway `402` or `429` produces a halted report. Configure key-level hard USD limits with the provider or gateway: gh0st records usage after a completed call and cannot prevent charges already incurred.
 
-If a worker exits without a report, its gateway usage cannot be verified. Recovery moves the full allocation from `reserved` to `uncertain` budget and excludes it from future admission. The status API and CLI show that uncertainty separately from confirmed consumption. Reconcile provider billing outside gh0st before treating that allocation as available again.
+If a worker exits without a report, its model usage cannot be verified. Recovery moves the full allocation from `reserved` to `uncertain` budget and excludes it from future admission. The status API and CLI show that uncertainty separately from confirmed consumption. Reconcile provider billing outside gh0st before treating that allocation as available again.
 
 ## Development
 

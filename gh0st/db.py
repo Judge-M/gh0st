@@ -76,6 +76,7 @@ class TicketRow(Base):
     permitted_local_capabilities_json: Mapped[str] = mapped_column(Text, default='["local_shell"]')
     gateway_allowance_json: Mapped[str] = mapped_column(Text, default="{}")
     assigned_model: Mapped[str] = mapped_column(Text, default="")
+    routing_strategy: Mapped[str] = mapped_column(String(32), default="smart")
     attached_tool_schema_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     max_tokens_allocated: Mapped[int] = mapped_column(Integer, default=4096)
     max_cost_usd: Mapped[float] = mapped_column(Float, default=0.50)
@@ -179,6 +180,22 @@ class PairedDeviceRow(Base):
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class InteractiveSessionRow(Base):
+    __tablename__ = "interactive_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(64), ForeignKey("tasks.task_id"), unique=True)
+    workspace_path: Mapped[str] = mapped_column(Text, nullable=False)
+    source_commit: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    selected_model: Mapped[str] = mapped_column(Text, default="")
+    routing_strategy: Mapped[str] = mapped_column(String(32), default="smart")
+    history_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc),
+                                                onupdate=lambda: datetime.now(timezone.utc))
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
 class StateLedger:
     """State Ledger Manager for gh0st, providing SQLite persistence for tickets, reports, quotas, and claims."""
 
@@ -209,6 +226,7 @@ class StateLedger:
                     "permitted_local_capabilities_json": "TEXT NOT NULL DEFAULT '[\"local_shell\"]'",
                     "gateway_allowance_json": "TEXT NOT NULL DEFAULT '{}'",
                     "assigned_model": "TEXT NOT NULL DEFAULT ''",
+                    "routing_strategy": "VARCHAR(32) NOT NULL DEFAULT 'smart'",
                     "claimed_at": "DATETIME",
                     "claim_owner": "VARCHAR(64)",
                     "lease_expires_at": "DATETIME",
@@ -272,6 +290,70 @@ class StateLedger:
                 raise ValueError(f"Unknown task: {task_id}")
             row.status = status
             session.commit()
+
+    # --- Interactive Session Operations ---
+    def create_interactive_session(self, session_id: str, task_id: str,
+                                   workspace_path: str, source_commit: Optional[str]) -> None:
+        with self.get_session() as session:
+            session.add(InteractiveSessionRow(
+                session_id=session_id, task_id=task_id,
+                workspace_path=workspace_path, source_commit=source_commit,
+            ))
+            session.commit()
+
+    @staticmethod
+    def _interactive_session_dict(row: InteractiveSessionRow) -> dict[str, Any]:
+        return {
+            "session_id": row.session_id, "task_id": row.task_id,
+            "workspace_path": row.workspace_path, "source_commit": row.source_commit,
+            "selected_model": row.selected_model, "routing_strategy": row.routing_strategy,
+            "history": json.loads(row.history_json), "created_at": row.created_at,
+            "updated_at": row.updated_at, "closed_at": row.closed_at,
+        }
+
+    def get_interactive_session(self, session_id: str) -> Optional[dict[str, Any]]:
+        with self.get_session() as session:
+            row = session.get(InteractiveSessionRow, session_id)
+            return self._interactive_session_dict(row) if row else None
+
+    def update_interactive_session(self, session_id: str, *, selected_model: Optional[str] = None,
+                                   routing_strategy: Optional[str] = None,
+                                   history: Optional[list[dict[str, str]]] = None,
+                                   closed: Optional[bool] = None) -> None:
+        with self.get_session() as session:
+            with session.begin():
+                row = session.get(InteractiveSessionRow, session_id)
+                if row is None:
+                    raise ValueError(f"Unknown interactive session: {session_id}")
+                if selected_model is not None:
+                    row.selected_model = selected_model
+                if routing_strategy is not None:
+                    row.routing_strategy = routing_strategy
+                if history is not None:
+                    row.history_json = json.dumps(history)
+                if closed is not None:
+                    row.closed_at = self._utc_now() if closed else None
+
+    def set_session_cost_budget(self, session_id: str, total_usd: float) -> None:
+        if total_usd <= 0:
+            raise ValueError("Session budget must be positive")
+        with self.get_session() as session:
+            with session.begin():
+                row = session.get(InteractiveSessionRow, session_id)
+                if row is None:
+                    raise ValueError(f"Unknown interactive session: {session_id}")
+                quota = session.query(QuotaRecordRow).filter(
+                    QuotaRecordRow.task_id == row.task_id).first()
+                if quota is None:
+                    raise ValueError("Session quota is unavailable")
+                committed = (quota.cost_usd_consumed + quota.cost_usd_reserved
+                             + quota.cost_usd_uncertain)
+                if total_usd < committed:
+                    raise ValueError("New budget cannot be lower than spent or reserved funds")
+                quota.max_cost_usd_budget = total_usd
+
+    def clear_session_history(self, session_id: str) -> None:
+        self.update_interactive_session(session_id, history=[])
 
     # --- Quota Operations ---
     def create_quota_record(self, quota: QuotaRecord) -> QuotaRecord:
@@ -365,6 +447,7 @@ class StateLedger:
                     permitted_local_capabilities_json=json.dumps(ticket.permitted_local_capabilities),
                     gateway_allowance_json=json.dumps(ticket.gateway_allowance),
                     assigned_model=ticket.assigned_model,
+                    routing_strategy=ticket.routing_strategy,
                     attached_tool_schema_json=(ticket.attached_tool_schema.model_dump_json() if ticket.attached_tool_schema else None),
                     max_tokens_allocated=ticket.max_tokens_allocated,
                     max_cost_usd=ticket.max_cost_usd, status=ticket.status.value,
@@ -384,6 +467,7 @@ class StateLedger:
             permitted_local_capabilities=json.loads(row.permitted_local_capabilities_json),
             gateway_allowance=json.loads(row.gateway_allowance_json),
             assigned_model=row.assigned_model,
+            routing_strategy=getattr(row, "routing_strategy", "smart"),
             attached_tool_schema=(ToolSchema.model_validate_json(row.attached_tool_schema_json) if row.attached_tool_schema_json else None),
             max_tokens_allocated=row.max_tokens_allocated,
             max_cost_usd=row.max_cost_usd,
