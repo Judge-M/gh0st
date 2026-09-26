@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/gh0st-hero.svg" alt="gh0st — local-first AI task execution" width="100%">
+  <img src="docs/gh0st-hero.png" alt="Luminous ghost agent waking from a model routing gateway, running an iterative loop, and dissolving into its report" width="100%">
 </p>
 
 <p align="center">
@@ -10,13 +10,13 @@
 </p>
 
 <p align="center">
-  <strong>Give AI a safe workbench.</strong><br>
-  gh0st runs each task in its own workspace, checks the work, and keeps external actions under your control.
+  <strong>An AI gateway built around ephemeral agents.</strong><br>
+  System-1 routes every turn. A fresh ghost does the work, reports back, and exits.
 </p>
 
 <p align="center">
   <a href="#-try-it">Try it</a> ·
-  <a href="#-how-it-works">How it works</a> ·
+  <a href="#-the-ghost-loop">The ghost loop</a> ·
   <a href="#-choose-your-interface">Interfaces</a> ·
   <a href="#-for-developers">Developers</a> ·
   <a href="#-security-model">Security</a>
@@ -26,29 +26,30 @@
 
 ## 👻 Meet gh0st
 
-AI coding tools are most useful when they can actually do the work: edit files, run tests, learn from failures, and show you what changed. gh0st gives them a **separate, task-scoped workbench** for that job.
+**gh0st is an SDK and AI gateway for ephemeral agents.** System-1 classifies each turn, chooses a model and one relevant tool schema, and dispatches a ticket to a short-lived worker: a ghost. The ghost acts, checks its work, returns a report, and exits. A new worker and model conversation are built for the next ticket, so hidden agent state does not accumulate between turns. The REPL can pass a bounded slice of recent chat history when continuity helps.
 
 <table>
   <tr>
-    <td width="50%"><strong>🧰 A workspace for every task</strong><br>Work happens in a separate repository clone. Your original checkout stays outside the worker's write boundary.</td>
-    <td width="50%"><strong>🧪 A real feedback loop</strong><br>Workers can edit, run tests, inspect failures, and report the diff and results.</td>
+    <td width="50%"><strong>🧠 System-1 gateway</strong><br>Fast local classification, model placement, budget admission, and one-schema tool pruning.</td>
+    <td width="50%"><strong>👻 Ephemeral ghosts</strong><br>A fresh worker per turn. No long-lived agent process accumulating stale working state.</td>
   </tr>
   <tr>
-    <td><strong>🧭 Routing with choice</strong><br>Choose smart, cost, quality, speed, or local routing—or pin a model yourself.</td>
-    <td><strong>🔐 You keep the keys</strong><br>External actions become grant requests for an operator to review.</td>
+    <td><strong>⚡ Lean context</strong><br>Tickets carry bounded context and a single task-relevant tool schema to the worker.</td>
+    <td><strong>🧪 Work that verifies itself</strong><br>Ghosts edit, run tests, inspect failures, and return a diff and execution report.</td>
   </tr>
 </table>
 
-### The flow
+## 🔁 The ghost loop
 
-```mermaid
-flowchart LR
-    A[Your task] --> B[Route and budget]
-    B --> C[Isolated task clone]
-    C --> D[Edit · run · verify]
-    D --> E[Report and diff]
-    C -. external action .-> F{Operator grant}
-```
+<p align="center"><img src="docs/gh0st-loop.svg" alt="gh0st architecture: System-1 routes each prompt into a bounded ticket, spawns a fresh ephemeral ghost, routes model calls through a provider adapter, and records the worker report in the ledger" width="100%"></p>
+
+1. **System-1 receives a turn.** The local Layla classifier is the zero-cost default; Jev is an optional classifier adapter.
+2. **The gateway makes the call plan.** It selects capability, model target, routing policy, budget, and one tool schema. A static `--model` override takes priority while still checking capability requirements.
+3. **A ticket wakes a ghost.** The short-lived worker receives its bounded context and runs the model/tool cycle for that turn. Model placement accounts for modality, task domain, quality floor, context capacity, latency, and price.
+4. **The ghost acts and exits.** It can work in its task-scoped clone, run tests, and inspect failures. It returns a report with its diff, commands, test results, usage, and unresolved issues, then the process ends.
+5. **The ledger keeps durable state.** Tickets, budgets, reports, and grant decisions persist in SQLite. Follow-up turns get a fresh worker and a deliberate context slice; interactive sessions retain bounded recent history for continuity.
+
+Model completions use gh0st's in-process provider adapters by default. An OpenAI-compatible gateway such as LiteLLM or OpenRouter can be configured as the model endpoint. The System-1 gateway handles task-level routing and governance either way.
 
 ## 🚀 Try it
 
@@ -154,11 +155,11 @@ Install another provider with an optional extra, for example `gh0st-core[anthrop
 | :--- | :--- |
 | Read and edit task files, run local commands and tests, create local commits. | Remote pushes, production writes, and non-gateway network actions are gated as grant requests. |
 
-On Linux, local commands run through bubblewrap. The task clone is the only persistent writable mount; `/tmp` is temporary, runtime directories are read-only, and the command has no network namespace access. Model requests use the configured provider or optional gateway in-process.
+On Linux, local commands run through bubblewrap. The task clone is the only persistent writable mount; `/tmp` is temporary, runtime directories are read-only, and the command has no network namespace access. Model completions use configured providers through in-process adapters by default, or an OpenAI-compatible endpoint when configured.
 
 **Workers never write to the source checkout.** A grant records an operator's decision; it does not itself perform the external action.
 
-Budgets are reserved before dispatch and clamp model calls to the ticket's remaining tokens and selected model context. If a worker exits without verified usage, the allocation is marked uncertain and is not made available again automatically.
+Budgets are reserved before dispatch and clamp model calls to the ticket's remaining tokens and selected model context. One-schema pruning and bounded context keep each request focused and token use controlled. If a worker exits without verified usage, the allocation is marked uncertain and is not made available again automatically.
 
 ## 📱 Mobile and relay
 
