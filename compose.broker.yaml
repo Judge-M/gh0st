@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile.broker
     restart: unless-stopped
     ports:
-      - "8765:8765"
+      - "${GH0ST_RELAY_BIND_ADDRESS:-127.0.0.1}:8765:8765"
     volumes:
       - ./secrets/devices.json:/run/secrets/devices.json:ro
       - ./secrets/tls.crt:/run/secrets/tls.crt:ro

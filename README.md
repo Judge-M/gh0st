@@ -102,7 +102,7 @@ The `grant` command records an operator decision. It does not launch a remote pu
 
 Create a `devices.json` file containing a device ID and a long random token, for example `{"my-linux":"<random-token-of-at-least-32-characters>"}`. Keep that file private. Start `gh0st-broker --devices devices.json` on loopback behind a TLS reverse proxy, or provide `--cert` and `--key` when binding it to an external interface. The daemon always initiates the outbound connection:
 
-For a TLS-enabled Docker Compose deployment on a Linux host, see [the relay deployment guide](docs/relay-deployment.md).
+For a TLS-enabled Docker Compose deployment, see [the relay deployment guide](docs/relay-deployment.md), which covers loopback-only local hosting and a publicly reachable VPS setup.
 
 ```bash
 export GH0ST_RELAY_URL=wss://relay.example.com
