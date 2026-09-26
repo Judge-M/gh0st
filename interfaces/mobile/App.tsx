@@ -21,6 +21,7 @@ import {
 } from 'react-native';
 
 const STORED_PAIRING_KEY = 'gh0st.pairing.v1';
+const STORED_PUSH_TOKEN_KEY = 'gh0st.push-token.v1';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({ shouldShowAlert: true, shouldPlaySound: false, shouldSetBadge: false }),
@@ -81,7 +82,6 @@ export default function Gh0stMobileApp() {
               void SecureStore.setItemAsync(STORED_PAIRING_KEY, JSON.stringify(pairing))
                 .then(() => setHasSavedPairing(true))
                 .catch(() => setPairingStatus(`Paired with ${pairing.device}; secure reconnect storage failed`));
-              void registerPushToken();
             }
           } else {
             handleIncomingEvent(decrypted);
@@ -165,7 +165,12 @@ export default function Gh0stMobileApp() {
     setIsPaired(false);
     setHasSavedPairing(false);
     setPairingStatus('Saved pairing removed from this phone');
-    if (Platform.OS !== 'web') await SecureStore.deleteItemAsync(STORED_PAIRING_KEY);
+    if (Platform.OS !== 'web') {
+      await Promise.all([
+        SecureStore.deleteItemAsync(STORED_PAIRING_KEY),
+        SecureStore.deleteItemAsync(STORED_PUSH_TOKEN_KEY),
+      ]);
+    }
   };
 
   useEffect(() => {
@@ -257,12 +262,29 @@ export default function Gh0stMobileApp() {
       });
       const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
       activePushToken.current = token;
+      await SecureStore.setItemAsync(STORED_PUSH_TOKEN_KEY, token);
       await sendRemoteAction('register_push', { token });
       setPairingStatus(`Paired with ${activePairing.current?.device}; push alerts enabled`);
     } catch {
       setPairingStatus('Paired; push alerts could not be enabled');
     }
   };
+
+  const restorePushToken = async () => {
+    if (Platform.OS === 'web') return;
+    try {
+      const token = await SecureStore.getItemAsync(STORED_PUSH_TOKEN_KEY);
+      if (!token) return;
+      activePushToken.current = token;
+      await sendRemoteAction('register_push', { token });
+    } catch {
+      setPairingStatus('Paired; saved push alert registration could not be restored');
+    }
+  };
+
+  useEffect(() => {
+    if (isPaired) void restorePushToken();
+  }, [isPaired]);
 
   const dispatchNewTask = () => {
     if (!prompt.trim()) return;

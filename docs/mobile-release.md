@@ -34,7 +34,7 @@ Install each preview on a physical iOS and Android device and verify:
 
 ## Expo Push setup
 
-Push alerts use Expo's push service and contain only a generic title/body. The app asks for notification permission after pairing when the operator taps **Enable push alerts**. The Expo push token is sent to the paired daemon inside the encrypted relay message and is held in daemon memory only. On daemon restart or mobile reconnect, enable alerts again to register the token. No prompts, task IDs, grant details, or approval controls are sent in push payloads.
+Push alerts use Expo's push service and contain only a generic title/body. Pairing alone does not request notification permission. The app asks after the operator taps **Enable push alerts**. After opt-in, the Expo push token is stored in the phone's secure store and sent to the paired daemon inside the encrypted relay message; the daemon holds it in memory only. The phone re-registers the token on reconnect or daemon restart. Forgetting the pairing deletes the saved token. No prompts, task IDs, grant details, or approval controls are sent in push payloads.
 
 Before push can be enabled, link this app to the owner's Expo project from `interfaces/mobile` with `eas init`, then commit the generated `extra.eas.projectId` in `app.json`. Configure Android FCM and iOS APNs credentials in Expo's project credentials. Keep credentials and EAS access tokens out of Git. Push delivery is best effort; use the app's encrypted relay status view as the source of truth.
 
