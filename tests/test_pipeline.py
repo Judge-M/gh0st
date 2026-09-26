@@ -2,6 +2,7 @@ from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -309,7 +310,19 @@ def test_api_contract(tmp_path, monkeypatch):
     db = ledger(tmp_path, monkeypatch)
     monkeypatch.setattr(Gh0stCLI, "process_queue", lambda *args, **kwargs: None)
     client = TestClient(create_app(db))
-    assert client.get("/v1/health").status_code == 200
+    home = client.get("/", follow_redirects=False)
+    assert home.status_code == 307
+    assert home.headers["location"] == "/ui"
+    ui = client.get("/ui")
+    assert ui.status_code == 200
+    assert "Good work starts here." in ui.text
+    assert "/_next/static/" in ui.text
+    stylesheet = re.search(r'<link rel="stylesheet" href="([^"]+\.css)"', ui.text)
+    assert stylesheet
+    assert client.get(stylesheet.group(1)).status_code == 200
+    health = client.get("/v1/health")
+    assert health.status_code == 200
+    assert health.json()["models"][0]["name"] == "test-model"
     status = client.get("/v1/status", params={"task_id": "task_test"})
     assert status.status_code == 200
     assert status.json()["quota"]["remaining_tokens"] == 1000
