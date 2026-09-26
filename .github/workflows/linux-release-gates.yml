@@ -37,7 +37,7 @@ jobs:
       - name: Install bubblewrap
         run: |
           sudo apt-get update
-          sudo apt-get install --yes bubblewrap iproute2 python3-venv
+          sudo apt-get install --yes bubblewrap iproute2 python3-venv util-linux
       - name: Configure bubblewrap for the hosted runner
         run: |
           wrapper_dir="$RUNNER_TEMP/gh0st-bin"
@@ -67,8 +67,9 @@ jobs:
           trap cleanup EXIT
           sudo -n ip netns add "$namespace"
           sudo -n ip -n "$namespace" link set lo up
-          if sudo -n nsenter --net="/run/netns/$namespace" \
-            --setgid="$gid" --setuid="$uid" -- /usr/bin/bwrap "${args[@]}"; then
+          if sudo -n nsenter --net="/run/netns/$namespace" -- \
+            /usr/bin/setpriv --regid="$gid" --reuid="$uid" --clear-groups \
+            /usr/bin/bwrap "${args[@]}"; then
             status=0
           else
             status=$?
