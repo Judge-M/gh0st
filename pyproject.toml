@@ -47,7 +47,7 @@ gh0st-relay = "gh0st.relay:main"
 include = ["gh0st*"]
 
 [tool.setuptools.package-data]
-gh0st = ["static/*.html"]
+gh0st = ["static/*.html", "static/web/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

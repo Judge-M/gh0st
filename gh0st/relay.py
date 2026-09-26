@@ -10,12 +10,14 @@ import uuid
 from typing import Literal, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from .cli import Gh0stCLI
+from .catalog import ModelCatalog
 from .db import StateLedger
 from .models import TicketStatus
 from .sdk import Gh0stClient
@@ -46,6 +48,9 @@ def create_app(db: Optional[StateLedger] = None,
     ledger = db or StateLedger()
     ledger.init_db()
     app = FastAPI(title="gh0st Control API", version="0.1.0")
+    web_root = Path(__file__).parent / "static" / "web"
+    if (web_root / "_next").is_dir():
+        app.mount("/_next", StaticFiles(directory=web_root / "_next"), name="next-static")
     api_token = os.getenv("GH0ST_API_TOKEN", "")
     workspaces = WorkspaceManager(workspace_root)
     sdk = Gh0stClient(ledger.db_url, str(workspaces.root))
@@ -54,15 +59,32 @@ def create_app(db: Optional[StateLedger] = None,
         if api_token and authorization != f"Bearer {api_token}":
             raise HTTPException(status_code=401, detail="Invalid API token")
 
+    @app.get("/", include_in_schema=False)
+    def home():
+        return RedirectResponse(url="/ui")
+
     @app.get("/ui", response_class=HTMLResponse)
     def dashboard():
+        exported_index = web_root / "index.html"
+        if exported_index.is_file():
+            return FileResponse(exported_index, media_type="text/html")
         return (Path(__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        icon = web_root / "favicon.ico"
+        if not icon.is_file():
+            raise HTTPException(status_code=404, detail="Favicon not found")
+        return FileResponse(icon)
 
     @app.get("/v1/health")
     def health(authorization: Optional[str] = Header(default=None)):
         authorize(authorization)
         return {"status": "ok", "default_classifier": os.getenv("GH0ST_ROUTER_MODEL", "layla"),
-                "gateway_target": os.getenv("GH0ST_GATEWAY_URL", "http://127.0.0.1:4000/v1")}
+                "gateway_target": os.getenv("GH0ST_GATEWAY_URL", "http://127.0.0.1:4000/v1"),
+                "models": [{"name": model.name, "gateway_model": model.gateway_model,
+                            "quality": model.quality, "placement": model.placement.value}
+                           for model in ModelCatalog.from_environment().targets]}
 
     @app.get("/v1/tasks")
     def tasks(limit: int = Query(default=50, ge=1, le=100),
