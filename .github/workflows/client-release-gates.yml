@@ -90,6 +90,10 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Verify local and VPS Compose bind addresses
+        run: |
+          docker compose -f compose.broker.yaml config --format json | jq -e '.services["gh0st-broker"].ports[0].host_ip == "127.0.0.1"'
+          GH0ST_RELAY_BIND_ADDRESS=0.0.0.0 docker compose -f compose.broker.yaml config --format json | jq -e '.services["gh0st-broker"].ports[0].host_ip == "0.0.0.0"'
       - name: Build broker image
         run: docker build --file Dockerfile.broker --tag gh0st-broker:ci .
       - name: Check broker entry point
