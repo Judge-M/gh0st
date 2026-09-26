@@ -102,6 +102,8 @@ The `grant` command records an operator decision. It does not launch a remote pu
 
 Create a `devices.json` file containing a device ID and a long random token, for example `{"my-linux":"<random-token-of-at-least-32-characters>"}`. Keep that file private. Start `gh0st-broker --devices devices.json` on loopback behind a TLS reverse proxy, or provide `--cert` and `--key` when binding it to an external interface. The daemon always initiates the outbound connection:
 
+For a TLS-enabled Docker Compose deployment on a Linux host, see [the relay deployment guide](docs/relay-deployment.md).
+
 ```bash
 export GH0ST_RELAY_URL=wss://relay.example.com
 export GH0ST_RELAY_TOKEN=<same-token-as-devices.json>
@@ -118,6 +120,8 @@ The browser dashboard is at `http://127.0.0.1:8383/ui`. It uses the address and 
 The VS Code extension in `interfaces/vscode` shows recent tasks, their tickets, and pending grant requests in the Explorer. Its Run command clones the active local workspace into a task-scoped workspace. Configure task budgets through `gh0st.maxBudgetUsd` and `gh0st.maxBudgetTokens`. If the local API has a token, use **gh0st: Set Local API Token** to save it in VS Code SecretStorage. Grant context actions record a ledger decision after operator confirmation.
 
 The Tauri desktop app in `interfaces/tauri` uses a Rust bridge restricted to the local daemon on `127.0.0.1`. It lists tasks, shows quota and worker reports, dispatches repository tasks, and records grant decisions. The API token is entered for the current app session and is not saved. The Linux release build has produced Debian and AppImage bundles; rebuild on a Linux machine with the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) and Rust installed using `cd interfaces/tauri && pnpm install && pnpm build`.
+
+The broker container and TLS-enabled Compose deployment are defined in `Dockerfile.broker` and `compose.broker.yaml`; see the [relay deployment guide](docs/relay-deployment.md). CI builds the container and checks its command entry point without publishing an image.
 
 ```bash
 curl -X POST http://127.0.0.1:8383/v1/run \

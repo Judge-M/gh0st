@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 .env
+secrets/
 *.db
 *.sqlite*
 node_modules/

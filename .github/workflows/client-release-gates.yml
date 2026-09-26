@@ -76,3 +76,15 @@ jobs:
       - name: Build Linux desktop package
         working-directory: interfaces/tauri
         run: pnpm exec tauri build --bundles deb
+
+  broker-container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Build broker image
+        run: docker build --file Dockerfile.broker --tag gh0st-broker:ci .
+      - name: Check broker entry point
+        run: docker run --rm gh0st-broker:ci --help
