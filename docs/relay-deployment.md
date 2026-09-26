@@ -80,3 +80,17 @@ docker compose -f compose.broker.yaml down
 ```
 
 The container runs as an unprivileged user with a read-only root filesystem, dropped Linux capabilities, and no writable mount except temporary memory. The broker keeps live sockets and pair routes in memory; after restart, connected daemons republish active pair IDs and mobile clients reconnect. Use the host's monitoring, certificate renewal, backup, and firewall processes. Rotate a device token by updating the broker map and matching daemon secret, then restart the broker and reconnect that daemon.
+
+## Future paid managed relay
+
+The current release does not provide a hosted gh0st relay account or subscription service. Local and self-hosted Compose remain available without a gh0st hosting subscription. A future paid tier can offer a gh0st-operated relay so customers do not manage a machine, domain, TLS certificate, or broker updates.
+
+That service needs a control plane alongside the existing opaque broker:
+
+1. Authenticate the gh0st account and check its paid-plan entitlement before provisioning or renewing managed relay access.
+2. Issue revocable, account-scoped device credentials; replace the current operator-maintained `devices.json` map for managed users.
+3. Isolate account/device routing and apply connection, device-count, and bandwidth limits to control abuse and hosting cost.
+4. Keep the end-to-end pairing secret and application messages encrypted between the daemon and phone. The managed broker should route ciphertext and retain only the minimum connection metadata needed to operate the service.
+5. Define subscription cancellation, failed-payment, credential revocation, retention, incident response, and service availability behavior before launch.
+
+The managed relay should be an opt-in connection choice in the app and CLI. Expired or unavailable managed access must not disable local task execution or a user's self-hosted relay. Pricing, included device count/usage, payment provider, hosting platform, and the grace period after failed payment are not selected yet.

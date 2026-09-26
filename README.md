@@ -125,6 +125,8 @@ Mobile preview and production build profiles are configured in `interfaces/mobil
 
 The broker container and TLS-enabled Compose deployment are defined in `Dockerfile.broker` and `compose.broker.yaml`; see the [relay deployment guide](docs/relay-deployment.md). CI builds the container and checks its command entry point without publishing an image.
 
+Local and self-hosted Docker Compose relay setups are the current options. A gh0st-managed relay is a planned paid-tier service and is not available yet; it will require account entitlements and automatic device credential provisioning while preserving the end-to-end encrypted relay protocol.
+
 ```bash
 curl -X POST http://127.0.0.1:8383/v1/run \
   -H 'Content-Type: application/json' \
