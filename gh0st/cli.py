@@ -4,6 +4,7 @@ import argparse
 import os
 import subprocess
 import sys
+import threading
 import uuid
 from typing import Optional
 from pathlib import Path
@@ -13,31 +14,27 @@ from .models import QuotaRecord, TicketStatus
 from .router import System1Router
 from .relay_crypto import new_pairing
 from .workspace import WorkspaceManager
+from .sdk import Gh0stClient
 
 
 class Gh0stCLI:
     def __init__(self, db_url: Optional[str] = None, workspace_root: Optional[str] = None):
-        self.db = StateLedger(db_url)
-        self.db.init_db()
-        self.workspaces = WorkspaceManager(workspace_root)
+        self.client = Gh0stClient(db_url, workspace_root)
+        self.db = self.client.ledger
+        self.workspaces = self.client.workspaces
 
     def run_prompt(self, prompt: str, task_id: Optional[str] = None, budget_usd: float = 5.0,
                    budget_tokens: int = 100000, gateway_url: Optional[str] = None,
                    source_repo: Optional[str] = None, model: Optional[str] = None,
-                   modality: Optional[str] = None) -> str:
+                   modality: Optional[str] = None,
+                   routing_strategy: Optional[str] = None) -> str:
         if not prompt.strip() or budget_usd <= 0 or budget_tokens < 1:
             raise ValueError("A prompt and positive budgets are required")
-        task_id = task_id or f"task_{uuid.uuid4().hex[:12]}"
-        if self.db.get_task(task_id):
-            raise ValueError(f"Task already exists: {task_id}")
-        workspace_path, source_commit = self.workspaces.create(task_id, source_repo)
-        self.db.create_task(task_id, prompt)
-        self.db.create_quota_record(QuotaRecord(task_id=task_id, max_tokens_budget=budget_tokens,
-                                                max_cost_usd_budget=budget_usd))
-        decision, ticket = System1Router(self.db).route(
-            prompt, task_id, workspace_path=workspace_path,
-            source_commit=source_commit, model_override=model, modality=modality,
-        )
+        dispatched = self.client.dispatch(prompt, task_id=task_id, source_repo=source_repo,
+                                          budget_usd=budget_usd, budget_tokens=budget_tokens,
+                                          model=model, modality=modality,
+                                          routing_strategy=routing_strategy or "smart")
+        task_id, decision, ticket = dispatched.task_id, dispatched.decision, dispatched.ticket
         print(f"Task {task_id}: {decision.selected_capability} ({decision.confidence_score:.2f})")
         if ticket is None:
             self.db.set_task_status(task_id, "halted")
@@ -47,7 +44,8 @@ class Gh0stCLI:
         self.process_queue(task_id, gateway_url)
         return task_id
 
-    def process_queue(self, task_id: str, gateway_url: Optional[str] = None) -> None:
+    def process_queue(self, task_id: str, gateway_url: Optional[str] = None,
+                      quiet: bool = False, on_text_delta=None) -> None:
         task = self.db.get_task(task_id)
         if task is None or task.status != "active":
             raise ValueError(f"Task is not active: {task_id}")
@@ -62,6 +60,11 @@ class Gh0stCLI:
         environment["GH0ST_WORKSPACE_ROOT"] = str(self.workspaces.root)
         if gateway_url:
             environment["GH0ST_GATEWAY_URL"] = gateway_url
+            environment["GH0ST_MODEL_EXECUTION"] = "gateway"
+        else:
+            environment["GH0ST_MODEL_EXECUTION"] = "aisuite"
+        if on_text_delta:
+            environment["GH0ST_STREAM_WORKER"] = "1"
         processed = 0
         while processed < 100:
             pending = [item for item in self.db.list_task_tickets(task_id) if item.status == TicketStatus.PENDING]
@@ -72,21 +75,52 @@ class Gh0stCLI:
             if not self.db.claim_ticket(next_ticket.ticket_id, owner):
                 return
             try:
-                result = subprocess.run([sys.executable, "-m", "gh0st.worker", next_ticket.ticket_id,
-                                         "--db-url", self.db.db_url, "--claim-owner", owner],
-                                        env=environment, check=False, capture_output=True, text=True)
+                command = [sys.executable, "-m", "gh0st.worker", next_ticket.ticket_id,
+                           "--db-url", self.db.db_url, "--claim-owner", owner]
+                if on_text_delta:
+                    process = subprocess.Popen(
+                        command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                        text=True, encoding="utf-8", errors="replace", bufsize=1,
+                    )
+                    stderr_parts: list[str] = []
+                    stderr_thread = threading.Thread(
+                        target=lambda: stderr_parts.extend(process.stderr.readlines()), daemon=True,
+                    )
+                    stderr_thread.start()
+                    report_payload = None
+                    for line in process.stdout:
+                        try:
+                            message = json.loads(line)
+                        except json.JSONDecodeError:
+                            if not quiet:
+                                print(line.rstrip())
+                            continue
+                        if message.get("type") == "event" and message.get("event") == "text_delta":
+                            on_text_delta(str(message.get("text") or ""))
+                        elif message.get("type") == "report":
+                            report_payload = message.get("report")
+                    return_code = process.wait()
+                    stderr_thread.join()
+                    stderr_text = "".join(stderr_parts)
+                    if stderr_text and not quiet:
+                        print(stderr_text.rstrip(), file=sys.stderr)
+                else:
+                    result = subprocess.run(command, env=environment, check=False,
+                                            capture_output=True, text=True)
+                    if result.stdout and not quiet:
+                        print(result.stdout.strip())
+                    if result.stderr and not quiet:
+                        print(result.stderr.strip(), file=sys.stderr)
+                    return_code = result.returncode
+                    report_payload = True
             except OSError as exc:
                 self.db.recover_abandoned_ticket(
                     next_ticket.ticket_id, f"Worker could not start: {exc}",
                     worker_exited=True, expected_owner=owner,
                 )
                 return
-            if result.stdout:
-                print(result.stdout.strip())
-            if result.stderr:
-                print(result.stderr.strip(), file=sys.stderr)
             processed += 1
-            if result.returncode != 0:
+            if return_code != 0:
                 report = self.db.get_worker_report(next_ticket.ticket_id)
                 if report is None:
                     self.db.recover_abandoned_ticket(
@@ -96,7 +130,7 @@ class Gh0stCLI:
                     report = self.db.get_worker_report(next_ticket.ticket_id)
                 self.db.set_task_status(task_id, "halted" if report and report.status == "halted" else "failed")
                 return
-            if self.db.get_worker_report(next_ticket.ticket_id) is None:
+            if report_payload is None or self.db.get_worker_report(next_ticket.ticket_id) is None:
                 self.db.recover_abandoned_ticket(
                     next_ticket.ticket_id, "Worker exited without a report",
                     worker_exited=True, expected_owner=owner,
@@ -120,6 +154,60 @@ class Gh0stCLI:
         elif any(item.status == TicketStatus.HALTED for item in tickets):
             self.db.set_task_status(task_id, "halted")
         return
+
+    def create_interactive_session(self, source_repo: Optional[str] = None,
+                                   budget_usd: float = 5.0, budget_tokens: int = 100000,
+                                   model: str = "", routing_strategy: str = "smart") -> dict:
+        if budget_usd <= 0 or budget_tokens < 1:
+            raise ValueError("Session budgets must be positive")
+        session_id = f"sess_{uuid.uuid4().hex[:12]}"
+        task_id = f"task_{uuid.uuid4().hex[:12]}"
+        workspace_path, source_commit = self.workspaces.create(task_id, source_repo)
+        self.db.create_task(task_id, f"Interactive session {session_id}")
+        self.db.create_quota_record(QuotaRecord(
+            task_id=task_id, max_tokens_budget=budget_tokens,
+            max_cost_usd_budget=budget_usd,
+        ))
+        self.db.create_interactive_session(session_id, task_id, workspace_path, source_commit)
+        self.db.update_interactive_session(session_id, selected_model=model,
+                                           routing_strategy=routing_strategy)
+        return self.db.get_interactive_session(session_id)
+
+    def run_session_turn(self, session_id: str, prompt: str,
+                         gateway_url: Optional[str] = None, on_routed=None, on_text_delta=None):
+        session = self.db.get_interactive_session(session_id)
+        if session is None:
+            raise ValueError(f"Unknown interactive session: {session_id}")
+        if not prompt.strip():
+            raise ValueError("A non-empty prompt is required")
+        task_id = session["task_id"]
+        self.db.set_task_status(task_id, "active")
+        history = session["history"][-20:]
+        decision, ticket = System1Router(self.db).route(
+            prompt, task_id, workspace_path=session["workspace_path"],
+            source_commit=session["source_commit"],
+            model_override=session["selected_model"] or None,
+            routing_strategy=session["routing_strategy"],
+            context_slice={"conversation_history": history},
+        )
+        if ticket is None:
+            self.db.set_task_status(task_id, "halted")
+            raise ValueError(decision.reasoning_summary)
+        if on_routed:
+            on_routed(decision, ticket)
+        self.process_queue(task_id, gateway_url, quiet=True, on_text_delta=on_text_delta)
+        report = self.db.get_worker_report(ticket.ticket_id)
+        if report is None:
+            raise ValueError("Worker exited without saving a report")
+        assistant_text = str(report.output.get("content") or "")
+        if report.stderr:
+            assistant_text = (assistant_text + "\n" if assistant_text else "") + report.stderr
+        updated_history = session["history"] + [
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": assistant_text},
+        ]
+        self.db.update_interactive_session(session_id, history=updated_history[-200:])
+        return decision, report
 
     def show_status(self, task_id: str) -> dict:
         task = self.db.get_task(task_id)
@@ -164,7 +252,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="gh0st")
     parser.add_argument("--db-url", default=None)
     parser.add_argument("--workspace-root", default=None)
-    commands = parser.add_subparsers(dest="command", required=True)
+    commands = parser.add_subparsers(dest="command")
     run = commands.add_parser("run")
     run.add_argument("prompt")
     run.add_argument("--task-id")
@@ -174,6 +262,16 @@ def main() -> None:
     run.add_argument("--source-repo", help="Repository to clone into this task's workspace")
     run.add_argument("--model", help="Explicit model target override")
     run.add_argument("--modality", choices=["text", "code", "vision", "image"])
+    run.add_argument("--routing-strategy", choices=["smart", "cost", "quality", "speed", "local"],
+                     help="Select model placement policy; --model overrides this choice")
+    chat = commands.add_parser("chat", help="Open an interactive gh0st session")
+    chat.add_argument("--session-id", help="Resume a prior interactive session")
+    chat.add_argument("--budget", "--budget-usd", dest="budget_usd", type=float, default=5.0)
+    chat.add_argument("--tokens", "--budget-tokens", dest="budget_tokens", type=int, default=100000)
+    chat.add_argument("--source-repo", default=os.getenv("GH0ST_SOURCE_REPO"))
+    chat.add_argument("--model", default="", help="Static model override for this session")
+    chat.add_argument("--routing-strategy", choices=["smart", "cost", "quality", "speed", "local"], default="smart")
+    chat.add_argument("--gateway-url")
     status = commands.add_parser("status")
     status.add_argument("task_id")
     resume = commands.add_parser("resume", help="Continue an active task and recover expired worker claims")
@@ -201,9 +299,23 @@ def main() -> None:
     args = parser.parse_args()
     cli = Gh0stCLI(args.db_url, args.workspace_root)
     try:
+        if args.command in {None, "chat"}:
+            from .repl import InteractiveShell
+            shell = InteractiveShell(
+                cli, source_repo=getattr(args, "source_repo", None),
+                budget_usd=getattr(args, "budget_usd", 5.0),
+                budget_tokens=getattr(args, "budget_tokens", 100000),
+                model=getattr(args, "model", ""),
+                routing_strategy=getattr(args, "routing_strategy", "smart"),
+                session_id=getattr(args, "session_id", None),
+                gateway_url=getattr(args, "gateway_url", None),
+            )
+            shell.run()
+            return
         if args.command == "run":
             task_id = cli.run_prompt(args.prompt, args.task_id, args.budget_usd, args.budget_tokens,
-                                     args.gateway_url, args.source_repo, args.model, args.modality)
+                                     args.gateway_url, args.source_repo, args.model, args.modality,
+                                     args.routing_strategy)
             sys.exit(0 if cli.db.get_task(task_id).status == "completed" else 1)
         if args.command == "status":
             cli.show_status(args.task_id)

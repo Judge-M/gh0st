@@ -267,11 +267,11 @@ When a Planner worker decomposes a project or an execution worker discovers requ
 
 ## 9. Memory Ledger & Token Economy
 
-`gh0st` integrates the trusted memory standards of **BrainConnect** into its state database.
+`gh0st` keeps authoritative governance separate from retrieved material.
 
 ### Memory & Token Rules
-* **Human-Gated Authority:** Only human-vetted claims (`is_trusted = TRUE`) can be promoted to permanent project context.
-* **Expired Memory Exclusion:** Ephemeral worker context packs (`worker_brief`) strictly filter out stale, invalid, or superseded claims (`validity = 'valid'`). Expired memory is preserved in the database for operator audits, but excluded from prompt context to save tokens and eliminate instruction conflicts.
+* **System Rules & Governance:** Human-approved SQLite claims are included in a distinct system instruction message. Only valid claims with `is_trusted = TRUE` are eligible; untrusted or expired claims are excluded.
+* **Retrieved Reference Context:** Optional Mem0, Pinecone, and Qdrant adapters query their configured service directly. Results are labeled as unverified reference data, are not written to SQLite, and do not acquire policy authority through retrieval.
 * **Pre-Dispatch Token Clamping:** Prompts are tokenized locally (`tiktoken` / `cl100k_base` / `o200k_base`) before dispatch. `max_tokens` is clamped to the remaining task budget in `quota_records`.
 
 ---
@@ -284,7 +284,7 @@ When a Planner worker decomposes a project or an execution worker discovers requ
 * **Persistence:** SQLite (Zero-config local) / PostgreSQL (Production)
 * **Networking & APIs:** `httpx`, `fastapi` / `uvicorn`, `websockets`
 * **Tokenization:** `tiktoken`
-* **Gateway Interfaces:** LiteLLM Proxy / OpenRouter (LLM routing), FastMCP / MCP Proxy (Tool execution)
+* **Model Interface:** In-process aisuite adapters by default; OpenAI-compatible gateways remain an opt-in transport.
 * **Remote Control Relay:** Reverse WebSocket / gRPC tunnel daemon (`gh0st-relay`)
 
 ### Implementation Milestones for `https://github.com/Judge-M/gh0st`

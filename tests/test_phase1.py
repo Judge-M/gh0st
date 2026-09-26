@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from gh0st.catalog import ModelCatalog, ModelTarget
 from gh0st.db import StateLedger, TicketRow
-from gh0st.models import ChildTicketProposal, ExecutionTier, GrantRequest, QuotaRecord, TicketStatus, WorkerReport
+from gh0st.models import ChildTicketProposal, ComputePlacement, ExecutionTier, GrantRequest, QuotaRecord, TicketStatus, WorkerReport
 from gh0st.cli import Gh0stCLI
 from gh0st.relay import create_app
 from gh0st.router import System1Router
@@ -212,6 +212,55 @@ def test_model_quality_capacity_and_explicit_override():
         catalog.select("code", 20000, 500, "code_refactor", ExecutionTier.HIGH_COMPLEXITY)
 
 
+def test_model_routing_strategies_use_more_than_cost():
+    catalog = ModelCatalog([
+        ModelTarget(name="cheap", gateway_model="openai:cheap", modalities={"text"},
+                    context_window=8192, max_payload_tokens=4096, quality="basic",
+                    domains={"general"}, cost_rank=1, latency_rank=40,
+                    placement=ComputePlacement.CLOUD_API),
+        ModelTarget(name="fast-local", gateway_model="ollama:fast", modalities={"text"},
+                    context_window=8192, max_payload_tokens=4096, quality="frontier",
+                    domains={"general"}, cost_rank=5, latency_rank=1,
+                    placement=ComputePlacement.LOCAL_GPU),
+        ModelTarget(name="specialist", gateway_model="anthropic:strong", modalities={"text"},
+                    context_window=8192, max_payload_tokens=4096, quality="frontier",
+                    domains={"code_refactor"}, cost_rank=9, latency_rank=10,
+                    placement=ComputePlacement.CLOUD_API),
+    ])
+    tier = ExecutionTier.LOW_COMPLEXITY
+    select = lambda strategy: catalog.select("text", 100, 100, "code_refactor", tier,
+                                             strategy=strategy).name
+    assert select("smart") == "specialist"
+    assert select("cost") == "cheap"
+    assert select("quality") == "specialist"
+    assert select("speed") == "fast-local"
+    assert select("local") == "fast-local"
+    assert catalog.select("text", 100, 100, "code_refactor", tier,
+                          override="openai:cheap", strategy="speed").name == "cheap"
+    with pytest.raises(ValueError, match="Unknown routing strategy"):
+        catalog.select("text", 100, 100, "code_refactor", tier, strategy="random")
+
+
+def test_interactive_session_persists_context_and_raises_budget(tmp_path):
+    db = StateLedger(f"sqlite:///{(tmp_path / 'sessions.db').as_posix()}")
+    db.init_db()
+    db.create_task("task_session", "interactive")
+    db.create_quota_record(QuotaRecord(task_id="task_session", max_tokens_budget=5000,
+                                       max_cost_usd_budget=5))
+    db.create_interactive_session("sess_test", "task_session", str(tmp_path / "workspace"), None)
+    db.update_interactive_session("sess_test", selected_model="openai:gpt-test",
+                                  routing_strategy="quality",
+                                  history=[{"role": "user", "content": "first turn"}])
+    session = db.get_interactive_session("sess_test")
+    assert session["selected_model"] == "openai:gpt-test"
+    assert session["routing_strategy"] == "quality"
+    assert session["history"][0]["content"] == "first turn"
+    db.set_session_cost_budget("sess_test", 10)
+    assert db.get_quota_record("task_session").max_cost_usd_budget == 10
+    db.clear_session_history("sess_test")
+    assert db.get_interactive_session("sess_test")["history"] == []
+
+
 class SequenceGateway:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -321,7 +370,7 @@ def test_existing_sqlite_ledger_receives_phase1_columns(tmp_path):
         ticket_columns = {row[1] for row in connection.execute("PRAGMA table_info(tickets)")}
         quota_columns = {row[1] for row in connection.execute("PRAGMA table_info(quota_records)")}
         report_columns = {row[1] for row in connection.execute("PRAGMA table_info(worker_reports)")}
-    assert {"workspace_path", "source_commit", "assigned_model", "claimed_at", "claim_owner", "lease_expires_at"} <= ticket_columns
+    assert {"workspace_path", "source_commit", "assigned_model", "routing_strategy", "claimed_at", "claim_owner", "lease_expires_at"} <= ticket_columns
     assert {"tokens_reserved", "cost_usd_reserved", "tokens_uncertain", "cost_usd_uncertain"} <= quota_columns
     assert {"diff", "commands_executed_json", "test_results_json"} <= report_columns
 

@@ -69,6 +69,7 @@ class Ticket(BaseModel):
     permitted_local_capabilities: List[str] = Field(default_factory=lambda: ["local_shell"])
     gateway_allowance: Dict[str, Any] = Field(default_factory=dict)
     assigned_model: str = Field(default="")
+    routing_strategy: str = Field(default="smart")
 
     # 1-Schema Rule
     attached_tool_schema: Optional[ToolSchema] = Field(default=None, description="Strictly 1 tool schema attached by System-1")
@@ -157,6 +158,7 @@ class System1Decision(BaseModel):
     confidence_score: float = Field(ge=0.0, le=1.0)
     selected_capability: str
     selected_model: Optional[str] = None
+    selected_routing_strategy: str = "smart"
     execution_tier: ExecutionTier
     compute_placement: ComputePlacement
     attached_tool_schema: Optional[ToolSchema] = None

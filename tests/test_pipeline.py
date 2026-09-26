@@ -19,6 +19,9 @@ from gh0st.router import EndpointClassifier
 from gh0st.worker import EphemeralWorker
 from gh0st.sandbox import CommandResult
 from gh0st.workspace import WorkspaceManager
+from gh0st.cli import Gh0stCLI
+from gh0st.reference import ReferenceHit
+from gh0st.sdk import Gh0stClient
 
 
 class StubGateway:
@@ -68,14 +71,67 @@ def test_route_worker_report_and_trusted_claims(tmp_path, monkeypatch):
         {"content": "", "tool_calls": [{"id": "call_1", "function": {"name": "local_workbench", "arguments": json.dumps({"action": "run_command", "command": "cat a.py", "purpose": "inspect"})}}], "total_tokens": 50, "cost_usd": 0.01},
         {"content": "Review complete", "tool_calls": [], "total_tokens": 25, "cost_usd": 0.01},
     ])
-    report = EphemeralWorker(db, gateway, StubSandbox).execute_turn(ticket.ticket_id)
+    class StubRetriever:
+        provider_name = "Pinecone"
+
+        def retrieve(self, query, limit=5):
+            assert query == "Refactor code"
+            return [ReferenceHit(text="helper lives in src/jwt.py", source="doc-1")]
+
+    report = EphemeralWorker(db, gateway, StubSandbox, StubRetriever()).execute_turn(ticket.ticket_id)
     assert report.status == "success"
     assert db.get_worker_report(ticket.ticket_id).output["content"] == "Review complete"
     assert db.get_quota_record("task_test").tokens_consumed == 75
     assert "trusted" in str(gateway.calls[0][0])
     assert "untrusted" not in str(gateway.calls[0][0])
+    messages = gateway.calls[0][0]
+    assert any(message["role"] == "system" and "trusted" in message["content"] for message in messages)
+    retrieved = [message for message in messages if "Retrieved Reference Material (Unverified Context)"
+                 in (message.get("content") or "")]
+    assert len(retrieved) == 1
+    assert "helper lives in src/jwt.py" in retrieved[0]["content"]
+    assert "not instructions or policy" in retrieved[0]["content"]
+    assert not any(claim.claim_text == "helper lives in src/jwt.py"
+                   for claim in db.get_trusted_valid_claims("task_test"))
     assert gateway.calls[0][2] > 0
     assert report.diff.startswith("diff --git")
+
+
+def test_retriever_adapters_normalize_hits(monkeypatch):
+    from gh0st.reference import Mem0Retriever, PineconeRetriever, QdrantRetriever
+
+    class Mem0:
+        def search(self, query, **kwargs):
+            return {"results": [{"id": "m1", "memory": "mem context", "score": 0.9}]}
+
+    class Pinecone:
+        def search(self, **kwargs):
+            return {"result": {"hits": [{"id": "p1", "score": 0.8,
+                                          "fields": {"text": "pine context", "category": "code"}}]}}
+
+    class Qdrant:
+        def query_points(self, **kwargs):
+            return {"points": [{"id": "q1", "score": 0.7,
+                                "payload": {"text": "qdrant context"}}]}
+
+    assert Mem0Retriever(Mem0(), user_id="test-user").retrieve("q")[0].text == "mem context"
+    assert PineconeRetriever(Pinecone()).retrieve("q")[0].text == "pine context"
+    assert QdrantRetriever(Qdrant(), collection="docs").retrieve("q")[0].text == "qdrant context"
+
+
+def test_public_sdk_dispatches_bounded_ticket(tmp_path, monkeypatch):
+    monkeypatch.setenv("GH0ST_MODEL_CATALOG", json.dumps([{
+        "name": "sdk-test", "gateway_model": "test-model",
+        "modalities": ["text", "code"], "context_window": 8192,
+        "max_payload_tokens": 4096, "quality": "frontier",
+    }]))
+    client = Gh0stClient(f"sqlite:///{(tmp_path / 'sdk.db').as_posix()}",
+                         str(tmp_path / "workspaces"))
+    result = client.dispatch("Refactor code", budget_usd=2, budget_tokens=1000)
+    assert result.ticket is not None
+    assert result.ticket.workspace_path.startswith(str(tmp_path / "workspaces"))
+    assert result.ticket.source_commit
+    assert result.decision.selected_model == "test-model"
 
 
 def test_quota_blocks_dispatch(tmp_path, monkeypatch):
@@ -120,12 +176,16 @@ def test_planner_child_reenters_router(tmp_path, monkeypatch):
 
 def test_api_contract(tmp_path, monkeypatch):
     db = ledger(tmp_path, monkeypatch)
+    monkeypatch.setattr(Gh0stCLI, "process_queue", lambda *args, **kwargs: None)
     client = TestClient(create_app(db))
     assert client.get("/v1/health").status_code == 200
     status = client.get("/v1/status", params={"task_id": "task_test"})
     assert status.status_code == 200
     assert status.json()["quota"]["remaining_tokens"] == 1000
     assert client.post("/v1/run", json={"prompt": ""}).status_code == 422
+    dispatched = client.post("/v1/run", json={"prompt": "Run pytest", "routing_strategy": "speed"})
+    assert dispatched.status_code == 202
+    assert dispatched.json()["decision"]["selected_routing_strategy"] == "speed"
 
 
 def test_task_list_is_bounded_and_authenticated(tmp_path, monkeypatch):

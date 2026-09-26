@@ -146,7 +146,8 @@ class System1Router:
               depth: int = 0, capability: Optional[str] = None,
               context_slice: Optional[dict] = None, workspace_path: Optional[str] = None,
               source_commit: Optional[str] = None, model_override: Optional[str] = None,
-              modality: Optional[str] = None) -> tuple[System1Decision, Optional[Ticket]]:
+              modality: Optional[str] = None,
+              routing_strategy: Optional[str] = None) -> tuple[System1Decision, Optional[Ticket]]:
         quota = self.db.get_quota_record(task_id)
         if quota is None:
             raise ValueError(f"Task {task_id} has no quota")
@@ -178,6 +179,7 @@ class System1Router:
             return self._halt(prompt, f"Unknown capability: {matched}"), None
         tier = template.default_tier
         selected_modality = modality or ("code" if matched in {"code_refactor", "unit_testing", "git_ops"} else "text")
+        selected_strategy = routing_strategy or os.getenv("GH0ST_ROUTING_STRATEGY", "smart")
         context = context_slice or {}
         payload_tokens = int(len(tiktoken.get_encoding("cl100k_base").encode(json.dumps({"prompt": prompt, "context": context}))) * 1.2) + 128
         remaining_tokens = min(quota.remaining_tokens, template.default_max_tokens)
@@ -186,7 +188,9 @@ class System1Router:
             return self._halt(prompt, "Insufficient task budget"), None
         try:
             target = self.catalog.select(selected_modality, payload_tokens,
-                                         min(remaining_tokens, 1024), matched, tier, model_override)
+                                         min(remaining_tokens, 1024), matched, tier, model_override,
+                                         selected_strategy)
+            fallback_targets = self.catalog.resolve_fallbacks(target)
         except ValueError as exc:
             return self._halt(prompt, str(exc)), None
         ticket = Ticket(
@@ -195,8 +199,18 @@ class System1Router:
             workspace_path=workspace_path, source_commit=source_commit,
             permitted_local_capabilities=["local_shell"],
             gateway_allowance={"enabled": True, "model": target.gateway_model,
-                               "max_calls": 12, "context_window": target.context_window},
+                               "max_calls": 12, "context_window": target.context_window,
+                               "fallback_models": [item.gateway_model for item in fallback_targets],
+                               "fallback_pricing": {item.gateway_model: {
+                                   "pricing_model": item.pricing_model,
+                                   "input_cost_per_million_usd": item.input_cost_per_million_usd,
+                                   "output_cost_per_million_usd": item.output_cost_per_million_usd,
+                               } for item in fallback_targets},
+                               "pricing_model": target.pricing_model,
+                               "input_cost_per_million_usd": target.input_cost_per_million_usd,
+                               "output_cost_per_million_usd": target.output_cost_per_million_usd},
             assigned_model=target.gateway_model,
+            routing_strategy=selected_strategy,
             attached_tool_schema=template.default_tool_schema,
             max_tokens_allocated=remaining_tokens, max_cost_usd=remaining_usd,
         )
@@ -207,10 +221,12 @@ class System1Router:
         return System1Decision(
             prompt=prompt, confidence_score=confidence, selected_capability=matched,
             selected_model=target.gateway_model,
+            selected_routing_strategy=selected_strategy,
             execution_tier=tier, compute_placement=target.placement,
             attached_tool_schema=template.default_tool_schema,
             requires_planner=matched == "planner",
-            reasoning_summary=f"Selected {matched} and {target.name} with {confidence:.2f} confidence",
+            reasoning_summary=(f"Selected {matched} and {target.name} using {selected_strategy} routing "
+                               f"with {confidence:.2f} confidence"),
         ), ticket
 
     @staticmethod
