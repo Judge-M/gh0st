@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/gh0st-hero.svg" alt="gh0st — System-1 AI gateway and ephemeral agent SDK" width="100%">
+  <img src="docs/gh0st-hero.png" alt="Luminous ghost agent waking from a model routing gateway, running an iterative loop, and dissolving into its report" width="100%">
 </p>
 
 <p align="center">
