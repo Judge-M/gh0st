@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 import threading
 import uuid
@@ -51,15 +52,24 @@ def create_app(db: Optional[StateLedger] = None,
                workspace_root: Optional[str] = None) -> FastAPI:
     ledger = db or StateLedger()
     ledger.init_db()
-    app = FastAPI(title="gh0st Control API", version="0.1.0")
-    app.add_event_handler("shutdown", ledger.close)
     web_root = Path(__file__).parent / "static" / "web"
-    if (web_root / "_next").is_dir():
-        app.mount("/_next", StaticFiles(directory=web_root / "_next"), name="next-static")
     api_token = os.getenv("GH0ST_API_TOKEN", "")
     workspaces = WorkspaceManager(workspace_root)
     sdk = Gh0stClient(ledger.db_url, str(workspaces.root))
-    app.add_event_handler("shutdown", sdk.close)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            try:
+                sdk.close()
+            finally:
+                ledger.close()
+
+    app = FastAPI(title="gh0st Control API", version="0.1.0", lifespan=lifespan)
+    if (web_root / "_next").is_dir():
+        app.mount("/_next", StaticFiles(directory=web_root / "_next"), name="next-static")
 
     def authorize(authorization: Optional[str]) -> None:
         if api_token and authorization != f"Bearer {api_token}":
