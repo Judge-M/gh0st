@@ -2,8 +2,19 @@ openapi: 3.1.0
 info:
   title: gh0st Local Control API
   version: 0.1.0
+  description: |
+    The API is intended for local loopback use. When GH0ST_API_TOKEN is configured,
+    send it as a Bearer token. Without a configured token, authentication is not required.
 servers:
   - url: http://127.0.0.1:8383
+security:
+  - bearerAuth: []
+  - {}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
 paths:
   /v1/health:
     get:
@@ -11,6 +22,27 @@ paths:
       responses:
         '200':
           description: Daemon is running
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, default_classifier, gateway_target, models]
+                properties:
+                  status: {type: string, const: ok}
+                  default_classifier: {type: string}
+                  gateway_target: {type: string, format: uri}
+                  models:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, gateway_model, quality, placement]
+                      properties:
+                        name: {type: string}
+                        gateway_model: {type: string}
+                        quality: {type: string}
+                        placement: {type: string}
+        '401':
+          description: GH0ST_API_TOKEN is configured and the supplied Bearer token is missing or invalid
   /v1/tasks:
     get:
       summary: List recent local tasks
@@ -36,6 +68,8 @@ paths:
                         status: {type: string}
                         created_at: {type: string, format: date-time}
                         updated_at: {type: string, format: date-time}
+        '401':
+          description: GH0ST_API_TOKEN is configured and the supplied Bearer token is missing or invalid
   /v1/run:
     post:
       summary: Route a task and queue its worker
@@ -84,6 +118,10 @@ paths:
                       compute_placement: {type: string}
                       attached_tool: {type: string}
                       requires_planner: {type: boolean}
+        '401':
+          description: GH0ST_API_TOKEN is configured and the supplied Bearer token is missing or invalid
+        '422':
+          description: Invalid request or no suitable model is configured
   /v1/status:
     get:
       summary: Read task progress and quota
@@ -133,6 +171,10 @@ paths:
                         action_type: {type: string}
                         status: {type: string, enum: [pending, approved, rejected]}
                         decided_by: {type: [string, 'null']}
+        '401':
+          description: GH0ST_API_TOKEN is configured and the supplied Bearer token is missing or invalid
+        '404':
+          description: Task was not found
   /v1/grants/{grant_id}/decision:
     post:
       summary: Record an operator decision for a proposed external action
@@ -157,3 +199,5 @@ paths:
           description: Decision recorded
         '409':
           description: Grant not found or already decided
+        '401':
+          description: GH0ST_API_TOKEN is configured and the supplied Bearer token is missing or invalid

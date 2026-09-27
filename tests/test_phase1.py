@@ -60,6 +60,7 @@ def configured_ledger(tmp_path, monkeypatch):
 
 def test_task_clone_is_independent_and_original_is_unchanged(tmp_path):
     source = source_repository(tmp_path)
+    git("remote", "add", "upstream", "https://example.invalid/upstream.git", cwd=source)
     source_head = git("rev-parse", "HEAD", cwd=source)
     manager = WorkspaceManager(str(tmp_path / "workspaces"))
     workspace, copied_head = manager.create("task_one", str(source))
@@ -72,6 +73,32 @@ def test_task_clone_is_independent_and_original_is_unchanged(tmp_path):
     assert git("rev-parse", "HEAD", cwd=source) == source_head
 
 
+def test_state_ledger_close_releases_database_file(tmp_path):
+    path = tmp_path / "closeable.db"
+    ledger = StateLedger(f"sqlite:///{path.as_posix()}")
+    ledger.init_db()
+    ledger.create_task("task_close", "Close ledger")
+    ledger.close()
+
+    path.unlink()
+    reopened = StateLedger(f"sqlite:///{path.as_posix()}")
+    reopened.init_db()
+    assert reopened.get_task("task_close") is None
+    reopened.close()
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="Linux resource limits")
+def test_linux_sandbox_sets_a_process_count_limit(monkeypatch):
+    import resource
+
+    configured = {}
+    monkeypatch.setattr(resource, "setrlimit", lambda limit, value: configured.update({limit: value}))
+    LinuxSandbox._limits()
+    soft, hard = configured[resource.RLIMIT_NPROC]
+    assert 1 <= soft <= 128
+    assert hard == soft
+
+
 def test_atomic_claim_and_budget_reservation(tmp_path, monkeypatch):
     db, manager, catalog = configured_ledger(tmp_path, monkeypatch)
     workspace, source_commit = manager.create("task_one")
@@ -82,18 +109,20 @@ def test_atomic_claim_and_budget_reservation(tmp_path, monkeypatch):
     reserved = db.get_quota_record("task_one")
     assert reserved.tokens_reserved == ticket.max_tokens_allocated
     with ThreadPoolExecutor(max_workers=2) as pool:
-        claims = list(pool.map(db.claim_ticket, [ticket.ticket_id, ticket.ticket_id]))
+        claims = list(pool.map(lambda _: db.claim_ticket(ticket.ticket_id, "owner_one"), range(2)))
     assert sorted(claims) == [False, True]
     report = WorkerReport(ticket_id=ticket.ticket_id, task_id="task_one",
                           status="success", tokens_used=50, cost_usd=0.1)
-    db.save_worker_report(report)
+    with pytest.raises(ValueError, match="claim"):
+        db.save_worker_report(report, claim_owner="wrong_owner")
+    db.save_worker_report(report, claim_owner="owner_one")
     final = db.get_quota_record("task_one")
     assert final.tokens_consumed == 50
     assert final.tokens_reserved == 0
     assert final.cost_usd_consumed == 0.1
     assert final.cost_usd_reserved == 0
     with pytest.raises(ValueError):
-        db.save_worker_report(report)
+        db.save_worker_report(report, claim_owner="owner_one")
     assert db.get_quota_record("task_one").tokens_consumed == 50
 
 
@@ -125,7 +154,7 @@ def test_expired_claim_recovery_halts_once_and_preserves_unknown_spend(tmp_path,
     with pytest.raises(ValueError):
         db.save_worker_report(WorkerReport(
             ticket_id=ticket.ticket_id, task_id="task_one", status="success",
-        ))
+        ), claim_owner="recovery_test")
 
 
 def test_worker_exit_without_report_is_recovered_immediately(tmp_path, monkeypatch):
@@ -187,7 +216,7 @@ def test_resume_recovers_claim_left_by_previous_process(tmp_path, monkeypatch):
     _, ticket = System1Router(db, catalog=catalog).route(
         "Fix code", "task_one", workspace_path=workspace, source_commit=source_commit,
     )
-    assert db.claim_ticket(ticket.ticket_id)
+    assert db.claim_ticket(ticket.ticket_id, "planner_test_owner")
     with db.get_session() as session:
         session.get(TicketRow, ticket.ticket_id).lease_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
         session.commit()
@@ -315,6 +344,7 @@ def test_external_action_is_logged_without_execution(tmp_path, monkeypatch):
     decided = db.decide_grant_request(grants[0].grant_id, True, "Matthew Judge")
     assert decided.status == "approved"
     assert decided.decided_by == "Matthew Judge"
+    assert decided.decided_at is not None and decided.decided_at.tzinfo is None
     with pytest.raises(ValueError):
         db.decide_grant_request(grants[0].grant_id, False, "Matthew Judge")
 
@@ -345,13 +375,13 @@ def test_unroutable_planner_child_does_not_complete_task(tmp_path, monkeypatch):
         "something unfamiliar", "task_one", workspace_path=workspace,
         source_commit=source_commit,
     )
-    assert db.claim_ticket(ticket.ticket_id)
+    assert db.claim_ticket(ticket.ticket_id, "planner_test_owner")
     db.save_worker_report(WorkerReport(
         ticket_id=ticket.ticket_id, task_id="task_one", status="success",
         child_ticket_proposals=[ChildTicketProposal(
             capability="unsupported", objective="Impossible child",
         )],
-    ))
+    ), claim_owner="planner_test_owner")
     Gh0stCLI(db.db_url, str(manager.root)).process_queue("task_one")
     assert db.get_task("task_one").status == "halted"
 

@@ -39,6 +39,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes bubblewrap python3-venv
       - name: Install project and test dependencies
+        id: install_project
         run: |
           /usr/bin/python3 -m venv --copies /tmp/gh0st-venv
           /tmp/gh0st-venv/bin/python -m pip install --upgrade pip
@@ -50,8 +51,10 @@ jobs:
         # workspaces match bubblewrap's namespace mapping; gh0st drops worker capabilities.
         run: sudo -n -- env GH0ST_SANDBOX_RUNTIME="$GH0ST_SANDBOX_RUNTIME" /tmp/gh0st-venv/bin/python -m pytest -q
       - name: Check admission and router latency
+        if: always() && steps.install_project.outcome == 'success'
         run: |
           /tmp/gh0st-venv/bin/python -m benchmarks.admission --directory /tmp
           /tmp/gh0st-venv/bin/python -m benchmarks.routing
       - name: Build SDK wheel
+        if: always() && steps.install_project.outcome == 'success'
         run: /tmp/gh0st-venv/bin/python -m pip wheel . --no-deps --wheel-dir dist

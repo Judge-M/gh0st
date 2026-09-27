@@ -3,6 +3,7 @@
 import asyncio
 import argparse
 import json
+import logging
 import os
 from pathlib import Path
 import threading
@@ -22,8 +23,11 @@ from .db import StateLedger
 from .models import TicketStatus
 from .sdk import Gh0stClient
 from .workspace import WorkspaceManager
-from .relay_crypto import PairCipher
+from .relay_crypto import PairCipher, validate_relay_url
 from .push import ExpoPushNotifier, valid_expo_push_token
+
+
+logger = logging.getLogger(__name__)
 
 
 class RunRequest(BaseModel):
@@ -48,12 +52,14 @@ def create_app(db: Optional[StateLedger] = None,
     ledger = db or StateLedger()
     ledger.init_db()
     app = FastAPI(title="gh0st Control API", version="0.1.0")
+    app.add_event_handler("shutdown", ledger.close)
     web_root = Path(__file__).parent / "static" / "web"
     if (web_root / "_next").is_dir():
         app.mount("/_next", StaticFiles(directory=web_root / "_next"), name="next-static")
     api_token = os.getenv("GH0ST_API_TOKEN", "")
     workspaces = WorkspaceManager(workspace_root)
     sdk = Gh0stClient(ledger.db_url, str(workspaces.root))
+    app.add_event_handler("shutdown", sdk.close)
 
     def authorize(authorization: Optional[str]) -> None:
         if api_token and authorization != f"Bearer {api_token}":
@@ -167,8 +173,7 @@ class CloudRelayClient:
 
     def __init__(self, relay_url: str, device_id: str, relay_token: str,
                  db: Optional[StateLedger] = None, workspace_root: Optional[str] = None):
-        if not relay_url.startswith("wss://") and not relay_url.startswith("ws://127.0.0.1:"):
-            raise ValueError("Relay URL must use wss:// outside loopback")
+        validate_relay_url(relay_url)
         if not relay_token:
             raise ValueError("Relay token is required")
         self.relay_url = relay_url
@@ -226,9 +231,12 @@ class CloudRelayClient:
                              payload: dict, seen_actions: set[str]) -> None:
         action_id = payload.get("action_id")
         action = payload.get("action_type")
-        if not isinstance(action_id, str) or not action_id.startswith("act_") or action_id in seen_actions:
+        if (not isinstance(action_id, str) or not action_id.startswith("act_")
+                or len(action_id) > 128 or action_id in seen_actions):
             return
         seen_actions.add(action_id)
+        if not self.db.claim_relay_action(cipher.pair_id, action_id):
+            return
         try:
             if action == "status":
                 result = self._task_snapshot(str(payload.get("task_id") or ""))
@@ -356,7 +364,10 @@ class CloudRelayClient:
                     finally:
                         offer_task.cancel()
                         await asyncio.gather(offer_task, return_exceptions=True)
-            except (OSError, ValueError, ConnectionClosed, json.JSONDecodeError):
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Relay connection failed; retrying in 5 seconds")
                 await asyncio.sleep(5)
 
 

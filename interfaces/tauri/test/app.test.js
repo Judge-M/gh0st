@@ -36,6 +36,9 @@ async function run() {
   byId('budget-usd').value = '3';
   byId('budget-tokens').value = '4000';
   const requests = [];
+  const clearedIntervals = [];
+  const windowListeners = {};
+  let nextInterval = 1;
   const invoke = async (command, args) => {
     requests.push({ command, args });
     if (command === 'health') return { status: 'ok' };
@@ -56,9 +59,12 @@ async function run() {
     throw new Error(`Unexpected command: ${command}`);
   };
   const context = {
-    window: { __TAURI__: { core: { invoke } }, confirm: () => true },
+    window: {
+      __TAURI__: { core: { invoke } }, confirm: () => true,
+      addEventListener: (name, listener) => { windowListeners[name] = listener; },
+    },
     document: { getElementById: byId, createElement: tag => new Element(tag) },
-    setInterval: () => 1, clearInterval: () => {},
+    setInterval: () => nextInterval++, clearInterval: id => clearedIntervals.push(id),
     console,
   };
   const source = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
@@ -72,6 +78,11 @@ async function run() {
   assert.equal(dispatch.args.maxBudgetUsd, 3);
   assert.equal(dispatch.args.maxBudgetTokens, 4000);
   assert.equal(dispatch.args.token, 'local-secret');
+  const taskButton = byId('tasks').children[0];
+  await taskButton.listeners.click();
+  assert.deepEqual(clearedIntervals, [1]);
+  windowListeners.pagehide();
+  assert.deepEqual(clearedIntervals, [1, 2]);
   const grant = byId('grants').children[1];
   const approve = grant.children.find(child => child.tag === 'button');
   await approve.listeners.click();

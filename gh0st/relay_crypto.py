@@ -1,13 +1,14 @@
 """End-to-end encryption for a one-time relay pairing session."""
 
 import base64
+import ipaddress
 import json
 import os
 import re
 import secrets
 import stat
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from typing import Any
 
 from cryptography.exceptions import InvalidTag
@@ -30,10 +31,38 @@ def _decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
+def validate_relay_url(relay_url: str) -> None:
+    """Require TLS except when the WebSocket host is actually loopback."""
+    if (not isinstance(relay_url, str) or not relay_url
+            or relay_url != relay_url.strip()
+            or any(ord(character) < 0x21 for character in relay_url)):
+        raise ValueError("Relay URL must use WSS outside loopback")
+    try:
+        parsed = urlsplit(relay_url)
+        hostname = parsed.hostname
+        parsed.port  # Force validation of malformed ports.
+    except ValueError as exc:
+        raise ValueError("Relay URL is invalid") from exc
+    if (parsed.scheme not in {"ws", "wss"} or not parsed.netloc or not hostname
+            or parsed.username is not None or parsed.password is not None
+            or parsed.fragment):
+        raise ValueError("Relay URL must use WSS outside loopback")
+    if parsed.scheme == "wss":
+        return
+    host = hostname.casefold().rstrip(".")
+    if host == "localhost":
+        return
+    try:
+        if ipaddress.ip_address(host).is_loopback:
+            return
+    except ValueError:
+        pass
+    raise ValueError("Relay URL must use WSS outside loopback")
+
+
 def new_pairing(relay_url: str, device_id: str) -> tuple[str, str, str]:
     """Return (pair_id, secret, QR URI); share the URI only with the operator."""
-    if not relay_url.startswith("wss://") and not relay_url.startswith("ws://127.0.0.1:"):
-        raise ValueError("Pairing requires WSS or loopback WS for local tests")
+    validate_relay_url(relay_url)
     # argparse treats a leading dash in a positional ID as an option. Keep
     # generated IDs safely usable with `gh0st unpair <pair_id>`.
     pair_id = f"pair_{secrets.token_urlsafe(24)}"

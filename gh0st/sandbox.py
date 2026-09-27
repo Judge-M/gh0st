@@ -86,6 +86,10 @@ class LinuxSandbox:
         resource.setrlimit(resource.RLIMIT_AS, (2 * 1024 * 1024 * 1024, 2 * 1024 * 1024 * 1024))
         resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024 * 1024, 64 * 1024 * 1024))
         resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
+        process_hard_limit = resource.getrlimit(resource.RLIMIT_NPROC)[1]
+        process_limit = (128 if process_hard_limit == resource.RLIM_INFINITY
+                         else min(128, process_hard_limit))
+        resource.setrlimit(resource.RLIMIT_NPROC, (process_limit, process_limit))
 
     def run(self, shell_command: str, purpose: str = "other") -> CommandResult:
         if not shell_command.strip() or len(shell_command) > 16384:

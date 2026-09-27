@@ -154,7 +154,6 @@ export default function Gh0stMobileApp() {
   };
 
   const forgetPairing = async () => {
-    if (activePushToken.current) void sendRemoteAction('unregister_push');
     activePushToken.current = null;
     activePairing.current = null;
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
@@ -185,13 +184,16 @@ export default function Gh0stMobileApp() {
     if (Platform.OS !== 'web') {
       void SecureStore.getItemAsync(STORED_PAIRING_KEY).then((value) => {
         if (!active || !value) return;
+        setHasSavedPairing(true);
         const saved = JSON.parse(value);
         const pairing = parsePairingUri(`gh0st://pair?relay=${encodeURIComponent(saved.relay)}&device=${encodeURIComponent(saved.device)}&pair=${encodeURIComponent(saved.pair)}&secret=${encodeURIComponent(saved.secret)}`);
-        setHasSavedPairing(true);
         setPairingStatus('Reconnecting to saved device…');
         connectWithPairing(pairing);
       }).catch(() => {
-        if (active) setPairingStatus('Saved pairing could not be read; scan a new code');
+        if (active) {
+          setHasSavedPairing(true);
+          setPairingStatus('Saved pairing is unreadable; forget it or scan a new code');
+        }
       });
     }
     return () => {
@@ -359,9 +361,23 @@ export default function Gh0stMobileApp() {
             </TouchableOpacity>
           )}
           {isPaired && Platform.OS !== 'web' && (
-            <TouchableOpacity style={styles.secondaryBtn} onPress={() => void registerPushToken()}>
-              <Text style={styles.primaryBtnText}>Enable push alerts</Text>
-            </TouchableOpacity>
+            <>
+              <TouchableOpacity
+                style={[styles.secondaryBtn, !Constants.expoConfig?.extra?.eas?.projectId && styles.disabledBtn]}
+                onPress={() => void registerPushToken()}
+                disabled={!Constants.expoConfig?.extra?.eas?.projectId}
+                accessibilityState={{ disabled: !Constants.expoConfig?.extra?.eas?.projectId }}
+              >
+                <Text style={styles.primaryBtnText}>
+                  {Constants.expoConfig?.extra?.eas?.projectId ? 'Enable push alerts' : 'Push alerts unavailable'}
+                </Text>
+              </TouchableOpacity>
+              {!Constants.expoConfig?.extra?.eas?.projectId && (
+                <Text style={styles.pushSetupHint}>
+                  Configure EXPO_PUBLIC_EAS_PROJECT_ID in the Expo project to enable push alerts.
+                </Text>
+              )}
+            </>
           )}
         </View>
 
@@ -590,6 +606,15 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     alignItems: 'center',
     marginBottom: 12,
+  },
+  disabledBtn: {
+    opacity: 0.55,
+  },
+  pushSetupHint: {
+    color: '#94a3b8',
+    fontSize: 12,
+    marginBottom: 12,
+    marginTop: -4,
   },
   cameraFrame: {
     height: 260,

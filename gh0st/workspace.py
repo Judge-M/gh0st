@@ -6,6 +6,7 @@ import re
 import shutil
 import struct
 import subprocess
+import zlib
 from typing import Optional
 
 
@@ -26,13 +27,41 @@ def image_header_matches(media_type: str, header: bytes) -> bool:
     return False
 
 
+def _png_dimensions(data: bytes) -> tuple[int, int]:
+    signature = b"\x89PNG\r\n\x1a\n"
+    if not data.startswith(signature):
+        raise ValueError("Image contents do not match the declared media type")
+    offset = len(signature)
+    while offset + 12 <= len(data):
+        size = int.from_bytes(data[offset:offset + 4], "big")
+        end = offset + 12 + size
+        if end > len(data):
+            raise ValueError("PNG image has a truncated chunk")
+        kind = data[offset + 4:offset + 8]
+        payload = data[offset + 8:offset + 8 + size]
+        checksum = int.from_bytes(data[offset + 8 + size:end], "big")
+        if zlib.crc32(kind + payload) & 0xFFFFFFFF != checksum:
+            raise ValueError("PNG image has an invalid chunk checksum")
+        if kind == b"IHDR":
+            if size != 13:
+                raise ValueError("PNG IHDR chunk must contain 13 bytes")
+            width, height = struct.unpack(">II", payload[:8])
+            if not width or not height or width * height > 100_000_000:
+                raise ValueError("PNG dimensions are outside the supported limit")
+            return width, height
+        if kind in {b"IDAT", b"IEND"}:
+            raise ValueError("PNG image is missing its IHDR chunk")
+        offset = end
+    raise ValueError("PNG image is missing a complete IHDR chunk")
+
+
 def conservative_image_tokens(media_type: str, data: bytes) -> int:
     """Upper bound image dimensions at 512-pixel tiles, plus protocol overhead."""
     if not image_header_matches(media_type, data[:32]):
         raise ValueError("Image contents do not match the declared media type")
     width = height = 0
-    if media_type == "image/png" and len(data) >= 24:
-        width, height = struct.unpack(">II", data[16:24])
+    if media_type == "image/png":
+        width, height = _png_dimensions(data)
     elif media_type == "image/jpeg":
         index = 2
         while index + 4 <= len(data):
@@ -118,7 +147,9 @@ class WorkspaceManager:
 
         # No object hardlinks, shared Git directory, hooks, or remote credentials.
         _git("clone", "--no-hardlinks", "--no-checkout", "--", str(source), str(target))
-        _git("-C", str(target), "remote", "remove", "origin")
+        for remote in _git("-C", str(target), "remote").splitlines():
+            if remote:
+                _git("-C", str(target), "remote", "remove", remote)
         _git("-C", str(target), "-c", "core.hooksPath=/dev/null", "checkout", "--detach", source_commit)
         for key in ("user.name", "user.email"):
             value = subprocess.run(

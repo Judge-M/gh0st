@@ -20,11 +20,13 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    delete,
     inspect,
     or_,
     update,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker, Session
+from sqlalchemy.exc import IntegrityError
 
 from .models import (
     ClaimValidity,
@@ -38,7 +40,7 @@ from .models import (
     ToolSchema,
     WorkerReport,
 )
-from .relay_crypto import decrypt_persistent_secret, encrypt_persistent_secret
+from .relay_crypto import MAX_MESSAGES_PER_PAIR, decrypt_persistent_secret, encrypt_persistent_secret
 
 
 class Base(DeclarativeBase):
@@ -182,6 +184,15 @@ class PairedDeviceRow(Base):
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class RelayActionRow(Base):
+    __tablename__ = "relay_actions"
+
+    pair_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    action_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+
+
 class InteractiveSessionRow(Base):
     __tablename__ = "interactive_sessions"
 
@@ -216,6 +227,16 @@ class StateLedger:
         self.db_url = db_url
         self.engine = create_engine(db_url, echo=False)
         self.SessionLocal = sessionmaker(bind=self.engine)
+
+    def close(self) -> None:
+        """Close pooled database connections owned by this ledger."""
+        self.engine.dispose()
+
+    def __enter__(self) -> "StateLedger":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
 
     def init_db(self):
         """Create tables and add the Phase 1 columns to existing SQLite ledgers."""
@@ -610,11 +631,15 @@ class StateLedger:
                 if self.recover_abandoned_ticket(ticket_id, "Worker claim expired before a report", now=now)]
 
     # --- Worker Report Operations ---
-    def save_worker_report(self, report: WorkerReport) -> WorkerReport:
+    def save_worker_report(self, report: WorkerReport, *, claim_owner: str) -> WorkerReport:
+        if not claim_owner:
+            raise ValueError("The worker claim owner is required to save a report")
         with self.get_session() as session:
             with session.begin():
                 ticket = session.get(TicketRow, report.ticket_id)
-                if ticket is None or ticket.task_id != report.task_id or ticket.status != TicketStatus.RUNNING.value:
+                if (ticket is None or ticket.task_id != report.task_id
+                        or ticket.status != TicketStatus.RUNNING.value
+                        or ticket.claim_owner != claim_owner):
                     raise ValueError("Ticket is not claimed by this task")
                 final_status = (
                     TicketStatus.COMPLETED.value if report.status == "success" else
@@ -624,7 +649,8 @@ class StateLedger:
                 claimed = session.execute(update(TicketRow).where(
                     TicketRow.ticket_id == report.ticket_id,
                     TicketRow.status == TicketStatus.RUNNING.value,
-                ).values(status=final_status, lease_expires_at=None))
+                    TicketRow.claim_owner == claim_owner,
+                ).values(status=final_status, claim_owner=None, lease_expires_at=None))
                 if claimed.rowcount != 1:
                     raise ValueError("Ticket claim was already finalized")
                 session.add(WorkerReportRow(
@@ -792,6 +818,8 @@ class StateLedger:
                     PairedDeviceRow.device_id == device_id,
                     PairedDeviceRow.revoked_at.is_(None),
                 ).values(revoked_at=self._utc_now(), secret_encrypted=""))
+                if result.rowcount == 1:
+                    session.execute(delete(RelayActionRow).where(RelayActionRow.pair_id == pair_id))
                 return result.rowcount == 1
 
     def list_revoked_pair_ids(self, device_id: str, relay_url: Optional[str] = None) -> list[str]:
@@ -803,6 +831,25 @@ class StateLedger:
             if relay_url is not None:
                 query = query.filter(PairedDeviceRow.relay_url == relay_url)
             return [row.pair_id for row in query.all()]
+
+    def claim_relay_action(self, pair_id: str, action_id: str) -> bool:
+        """Atomically record a paired action ID so it cannot replay after reconnect."""
+        if not pair_id or len(pair_id) > 128 or not action_id or len(action_id) > 128:
+            raise ValueError("Invalid relay action identity")
+        try:
+            with self.get_session() as session:
+                with session.begin():
+                    if session.get(RelayActionRow, (pair_id, action_id)) is not None:
+                        return False
+                    count = session.query(RelayActionRow.action_id).filter(
+                        RelayActionRow.pair_id == pair_id,
+                    ).count()
+                    if count >= MAX_MESSAGES_PER_PAIR:
+                        return False
+                    session.add(RelayActionRow(pair_id=pair_id, action_id=action_id))
+        except IntegrityError:
+            return False
+        return True
 
     def expire_relay_pairs(self) -> None:
         with self.get_session() as session:
@@ -836,7 +883,7 @@ class StateLedger:
     def decide_grant_request(self, grant_id: str, approved: bool, operator_id: str) -> GrantRequest:
         if not operator_id.strip():
             raise ValueError("An operator identity is required")
-        decided_at = datetime.now(timezone.utc)
+        decided_at = self._utc_now()
         with self.get_session() as session:
             with session.begin():
                 result = session.execute(

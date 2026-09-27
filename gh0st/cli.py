@@ -1,6 +1,7 @@
 """Command line entry points for dispatch and status."""
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -22,6 +23,9 @@ class Gh0stCLI:
         self.client = Gh0stClient(db_url, workspace_root)
         self.db = self.client.ledger
         self.workspaces = self.client.workspaces
+
+    def close(self) -> None:
+        self.client.close()
 
     def run_prompt(self, prompt: str, task_id: Optional[str] = None, budget_usd: float = 5.0,
                    budget_tokens: int = 100000, gateway_url: Optional[str] = None,
@@ -360,6 +364,8 @@ def main() -> None:
             uvicorn.run(create_app(cli.db, str(cli.workspaces.root)), host=args.host, port=args.port)
     except ValueError as exc:
         parser.exit(2, f"gh0st: {exc}\n")
+    finally:
+        cli.close()
 
 
 if __name__ == "__main__":

@@ -263,6 +263,23 @@ def test_vision_token_reservation_accounts_for_image_dimensions(tmp_path):
     assert WorkspaceManager.validate_image_inputs([str(source_image)])
 
 
+def test_png_token_reservation_reads_the_ihdr_chunk(tmp_path):
+    import zlib
+    from gh0st.workspace import WorkspaceManager, conservative_image_tokens
+
+    valid = _png_bytes(2048, 1024)
+    payload = b"gh0st metadata"
+    ancillary = (len(payload).to_bytes(4, "big") + b"tEXt" + payload
+                 + (zlib.crc32(b"tEXt" + payload) & 0xFFFFFFFF).to_bytes(4, "big"))
+    with_ancillary_prefix = valid[:8] + ancillary + valid[8:]
+    assert conservative_image_tokens("image/png", with_ancillary_prefix) == \
+        conservative_image_tokens("image/png", valid)
+
+    path = tmp_path / "prefixed.png"
+    path.write_bytes(with_ancillary_prefix)
+    assert WorkspaceManager.validate_image_inputs([str(path)])
+
+
 def test_image_generation_requires_explicit_modality_and_price(tmp_path, monkeypatch):
     catalog = [{
         "name": "image-test", "gateway_model": "openai:image-test",
@@ -499,3 +516,75 @@ def test_cli_spawns_worker_against_gateway(tmp_path):
         task = session.query(TaskRow).one()
         assert task.status == "completed"
         assert db.get_quota_record(task.task_id).tokens_consumed == 50
+
+
+def test_cli_streams_text_delta_from_ephemeral_worker(tmp_path, monkeypatch):
+    import io
+    from gh0st.models import WorkerReport
+
+    monkeypatch.setenv("GH0ST_DEFAULT_MODEL", "stream-test")
+    monkeypatch.setenv("GH0ST_DEFAULT_MODEL_QUALITY", "frontier")
+    db_url = f"sqlite:///{(tmp_path / 'stream.db').as_posix()}"
+    root = str(tmp_path / "workspaces")
+    client = Gh0stClient(db_url, root)
+    dispatch = client.dispatch("Refactor code", task_id="task_stream", budget_usd=2,
+                               budget_tokens=1000)
+    assert dispatch.ticket is not None
+
+    class FakeProcess:
+        def __init__(self, command, **_kwargs):
+            owner = command[command.index("--claim-owner") + 1]
+            client.ledger.save_worker_report(
+                WorkerReport(ticket_id=dispatch.ticket.ticket_id,
+                             task_id=dispatch.task_id, status="success"),
+                claim_owner=owner,
+            )
+            report = client.ledger.get_worker_report(dispatch.ticket.ticket_id)
+            self.stdout = iter([
+                json.dumps({"type": "event", "event": "text_delta", "text": "streamed"}) + "\n",
+                json.dumps({"type": "report", "report": report.model_dump(mode="json")}) + "\n",
+            ])
+            self.stderr = io.StringIO("")
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr("gh0st.cli.subprocess.Popen", FakeProcess)
+    deltas = []
+    Gh0stCLI(db_url, root).process_queue(dispatch.task_id, gateway_url="http://127.0.0.1:4000/v1",
+                                          on_text_delta=deltas.append)
+    assert deltas == ["streamed"]
+    assert client.ledger.get_task(dispatch.task_id).status == "completed"
+
+
+@pytest.mark.parametrize("cost", [float("nan"), float("inf"), float("-inf")])
+def test_gateway_rejects_non_finite_cost_usage(monkeypatch, cost):
+    from gh0st.worker import GatewayConfig, PluggableGatewayAdapter
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": "ok", "tool_calls": []}}],
+                "usage": {"total_tokens": 1, "cost_usd": cost},
+            }
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, *_args, **_kwargs):
+            return Response()
+
+    monkeypatch.setattr("gh0st.worker.httpx.Client", Client)
+    gateway = PluggableGatewayAdapter(GatewayConfig(gateway_url="http://127.0.0.1:4000/v1"))
+    with pytest.raises(ValueError, match="usage"):
+        gateway.complete_turn([], None, 10, "test-model")

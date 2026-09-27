@@ -184,6 +184,7 @@ export default function Page() {
   const [operator, setOperator] = useState("local-operator")
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const [connectionError, setConnectionError] = useState("")
   const [notice, setNotice] = useState("")
   const [filter, setFilter] = useState("all")
 
@@ -213,7 +214,7 @@ export default function Page() {
     ])
     setHealth(healthData)
     setTasks(taskData.tasks)
-    setError("")
+    setConnectionError("")
     return taskData.tasks
   }, [request])
 
@@ -243,10 +244,11 @@ export default function Page() {
         if (!alive) return
         setHealth(healthData)
         setTasks(taskData.tasks)
+        setConnectionError("")
         if (taskData.tasks.length) setSelectedId(taskData.tasks[0].task_id)
       } catch (caught) {
         if (alive)
-          setError(
+          setConnectionError(
             caught instanceof Error
               ? caught.message
               : "Could not connect to gh0st"
@@ -271,11 +273,11 @@ export default function Page() {
         )
         if (alive) {
           setDetail(data)
-          setError("")
+          setConnectionError("")
         }
       } catch (caught) {
         if (alive)
-          setError(
+          setConnectionError(
             caught instanceof Error ? caught.message : "Could not load task"
           )
       }
@@ -471,7 +473,9 @@ export default function Page() {
                 size="icon"
                 aria-label="Refresh tasks"
                 onClick={() =>
-                  void loadTasks().catch((caught) => setError(caught.message))
+                  void loadTasks().catch((caught) =>
+                    setConnectionError(caught instanceof Error ? caught.message : "Could not refresh gh0st")
+                  )
                 }
               >
                 <Icon name="refresh" className="size-4" />
@@ -499,12 +503,25 @@ export default function Page() {
               </div>
             </div>
 
-            {(error || notice) && (
+            {error && (
+              <div
+                role="alert"
+                className="mt-6 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive"
+              >
+                {error}
+              </div>
+            )}
+            {connectionError && (
               <div
                 role="status"
-                className={`mt-6 rounded-lg border px-4 py-3 text-sm ${error ? "border-destructive/30 bg-destructive/5 text-destructive" : "border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-300"}`}
+                className="mt-6 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-sm text-amber-800 dark:text-amber-200"
               >
-                {error || notice}
+                Local connection issue: {connectionError}
+              </div>
+            )}
+            {!error && notice && (
+              <div role="status" className="mt-6 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-300">
+                {notice}
               </div>
             )}
 
@@ -621,7 +638,7 @@ export default function Page() {
                         <input
                           type="number"
                           min="1"
-                          step="1000"
+                          step="1"
                           value={tokens}
                           onChange={(event) => setTokens(event.target.value)}
                           className="mt-1 block h-8 w-full rounded-md border border-input bg-background px-2 text-sm"

@@ -3,6 +3,11 @@ const byId = id => document.getElementById(id);
 let selectedTask = null;
 let poller = null;
 
+function stopPolling() {
+  if (poller !== null) clearInterval(poller);
+  poller = null;
+}
+
 function localSettings() {
   const port = Number(byId('port').value);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Choose a valid API port.');
@@ -113,20 +118,19 @@ async function refreshSelectedTask() {
   renderQuota(data.quota);
   renderGrants(data.grant_requests);
   renderTickets(data.tickets);
-  if (['completed', 'failed', 'halted'].includes(data.status) && poller) {
-    clearInterval(poller);
-    poller = null;
-  }
+  if (['completed', 'failed', 'halted'].includes(data.status)) stopPolling();
 }
 
 async function selectTask(taskId) {
   selectedTask = taskId;
-  if (poller) clearInterval(poller);
+  stopPolling();
   poller = setInterval(() => {
     refreshSelectedTask().catch(error => setMessage(error));
   }, 3000);
   try { await refreshSelectedTask(); } catch (error) { setMessage(error); }
 }
+
+window.addEventListener('pagehide', stopPolling);
 
 async function connect() {
   try {

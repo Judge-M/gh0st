@@ -20,6 +20,30 @@ from gh0st.relay import CloudRelayClient
 from gh0st.relay_crypto import PairCipher, new_pairing
 
 
+@pytest.mark.parametrize("relay_url", [
+    "wss://relay.example.test",
+    "ws://127.0.0.1:8765",
+    "ws://localhost:8765",
+    "ws://[::1]:8765",
+])
+def test_pairing_accepts_tls_or_a_parsed_loopback_host(relay_url):
+    assert new_pairing(relay_url, "dev_test")[0].startswith("pair_")
+
+
+@pytest.mark.parametrize("relay_url", [
+    "ws://127.0.0.1:80@evil.test",
+    "ws://127.0.0.1.evil.test:8765",
+    "ws://evil.test",
+    "ws://user@127.0.0.1:8765",
+    "https://relay.example.test",
+])
+def test_pairing_and_cloud_client_reject_non_loopback_plaintext(relay_url):
+    with pytest.raises(ValueError):
+        new_pairing(relay_url, "dev_test")
+    with pytest.raises(ValueError):
+        CloudRelayClient(relay_url, "dev_test", "relay-token")
+
+
 def test_pair_cipher_authenticates_direction_and_rejects_replay():
     pair_id, secret, uri = new_pairing("ws://127.0.0.1:8765", "dev_test")
     device = PairCipher(secret, pair_id, "device")
@@ -88,6 +112,20 @@ def test_pairing_secret_is_encrypted_persisted_and_revocable(tmp_path, monkeypat
     assert db.get_paired_device(pair_id, "dev_test") is None
     assert db.list_paired_devices("dev_test") == []
     assert pair_id in db.list_revoked_pair_ids("dev_test")
+
+
+def test_relay_action_ids_survive_ledger_reopen(tmp_path):
+    db_url = f"sqlite:///{(tmp_path / 'relay-actions.db').as_posix()}"
+    first = StateLedger(db_url)
+    first.init_db()
+    assert first.claim_relay_action("pair_action_test", "act_once")
+    first.close()
+
+    reopened = StateLedger(db_url)
+    reopened.init_db()
+    assert not reopened.claim_relay_action("pair_action_test", "act_once")
+    assert reopened.claim_relay_action("pair_action_test", "act_twice")
+    reopened.close()
 
 
 def test_pairing_cli_lists_and_revokes_device(tmp_path, monkeypatch, capsys):
@@ -207,6 +245,62 @@ def test_broker_rejects_unauthorized_device_and_unknown_offer():
     asyncio.run(scenario())
 
 
+def test_relay_client_logs_and_retries_unexpected_connection_failures(tmp_path, monkeypatch, caplog):
+    async def scenario():
+        db = StateLedger(f"sqlite:///{(tmp_path / 'retry.db').as_posix()}")
+        db.init_db()
+        client = CloudRelayClient("wss://relay.example.test", "dev_test", "relay-token",
+                                  db, str(tmp_path / "workspaces"))
+        attempts = []
+        delays = []
+
+        class Socket:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def send(self, _message):
+                return None
+
+            async def recv(self):
+                return json.dumps({"message_type": "device_registered"})
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise RuntimeError("simulated relay ledger failure")
+
+        def fake_connect(*_args, **_kwargs):
+            attempts.append("connect")
+            if len(attempts) > 1:
+                raise asyncio.CancelledError()
+            return Socket()
+
+        original_sleep = asyncio.sleep
+
+        async def fast_sleep(seconds):
+            delays.append(seconds)
+            await original_sleep(0)
+
+        monkeypatch.setattr("gh0st.relay.connect", fake_connect)
+        monkeypatch.setattr("gh0st.relay.asyncio.sleep", fast_sleep)
+        try:
+            with caplog.at_level("ERROR", logger="gh0st.relay"):
+                with pytest.raises(asyncio.CancelledError):
+                    await client.run()
+        finally:
+            client.cli.close()
+            db.close()
+        assert len(attempts) == 2
+        assert 5 in delays
+        assert "simulated relay ledger failure" in caplog.text
+
+    asyncio.run(scenario())
+
+
 def test_paired_daemon_handles_encrypted_status_grant_and_dispatch(tmp_path, monkeypatch):
     async def scenario():
         monkeypatch.setenv("GH0ST_RELAY_KEY_FILE", str(tmp_path / "relay.key"))
@@ -286,11 +380,12 @@ def test_paired_daemon_handles_encrypted_status_grant_and_dispatch(tmp_path, mon
                     result = cipher.decrypt(json.loads(await asyncio.wait_for(client.recv(), 5)))
                     assert result["result"]["status"] == "approved"
                     assert db.list_grant_requests("task_one")[0].status == "approved"
-                    await client.send(json.dumps(cipher.encrypt({
+                    dispatch_frame = cipher.encrypt({
                         "action_id": "act_dispatch", "action_type": "dispatch_task",
                         "prompt": "Fix a parser bug", "budget_usd": 2,
                         "budget_tokens": 5000,
-                    })))
+                    })
+                    await client.send(json.dumps(dispatch_frame))
                     responses = [cipher.decrypt(json.loads(await asyncio.wait_for(client.recv(), 5)))
                                  for _ in range(2)]
                     accepted = next(item for item in responses if item["message_type"] == "action_result")
@@ -320,6 +415,10 @@ def test_paired_daemon_handles_encrypted_status_grant_and_dispatch(tmp_path, mon
                     resumed = resumed_cipher.decrypt(json.loads(await asyncio.wait_for(reconnected_client.recv(), 5)))
                     assert resumed["message_type"] == "paired"
                     assert db.get_paired_device(pair_id, "dev_test")["secret"] == secret
+                    await reconnected_client.send(json.dumps(dispatch_frame))
+                    with pytest.raises(asyncio.TimeoutError):
+                        await asyncio.wait_for(reconnected_client.recv(), 0.1)
+                    assert len(dispatched) == 1
                     assert db.revoke_paired_device(pair_id, "dev_test")
                     with pytest.raises(ConnectionClosed):
                         await asyncio.wait_for(reconnected_client.recv(), 5)
