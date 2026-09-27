@@ -44,6 +44,16 @@ class Gh0stClient:
             self.reference_retrievers = {reference_retriever.provider_name.casefold(): reference_retriever}
         self.secret_resolver = secret_resolver
 
+    def close(self) -> None:
+        """Release database connections held by this SDK client."""
+        self.ledger.close()
+
+    def __enter__(self) -> "Gh0stClient":
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
     def dispatch(self, prompt: str, *, source_repo: str | None = None,
                  budget_usd: float = 5.0, budget_tokens: int = 100_000,
                  model: str | None = None, modality: str | None = None,

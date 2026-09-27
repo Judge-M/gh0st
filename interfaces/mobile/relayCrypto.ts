@@ -21,6 +21,32 @@ export interface Envelope {
   ciphertext: string;
 }
 
+function validateRelayUrl(relay: string): void {
+  if (!relay || relay !== relay.trim() || /[\u0000-\u001f]/.test(relay)) {
+    throw new Error('Invalid relay URL');
+  }
+  let url: URL;
+  try {
+    url = new URL(relay);
+  } catch {
+    throw new Error('Invalid relay URL');
+  }
+  const authority = relay.slice(relay.indexOf('://') + 3).split(/[/?#]/, 1)[0];
+  if (!url.hostname || url.username || url.password || url.hash ||
+      authority.includes('@') || (url.protocol !== 'wss:' && url.protocol !== 'ws:')) {
+    throw new Error('Pairing requires WSS outside loopback');
+  }
+  if (url.protocol === 'wss:') return;
+  const hostname = url.hostname.toLowerCase();
+  const octets = hostname.split('.').map(Number);
+  const loopbackV4 = octets.length === 4 && octets[0] === 127 &&
+    octets.every(value => Number.isInteger(value) && value >= 0 && value <= 255);
+  if (hostname.replace(/\.$/, '') !== 'localhost' &&
+      hostname !== '[::1]' && hostname !== '::1' && !loopbackV4) {
+    throw new Error('Pairing requires WSS outside loopback');
+  }
+}
+
 function encode(bytes: Uint8Array): string {
   let result = '';
   for (let i = 0; i < bytes.length; i += 3) {
@@ -59,9 +85,7 @@ export function parsePairingUri(uri: string): Pairing {
   const device = url.searchParams.get('device') || '';
   const pair = url.searchParams.get('pair') || '';
   const secret = url.searchParams.get('secret') || '';
-  if (!relay.startsWith('wss://') && !relay.startsWith('ws://127.0.0.1:')) {
-    throw new Error('Pairing requires WSS outside loopback');
-  }
+  validateRelayUrl(relay);
   if (!pairFormat.test(pair) || decode(secret).length !== 32 || !device) {
     throw new Error('Invalid pairing ID, secret, or device');
   }
@@ -95,6 +119,10 @@ export class PairCipher {
 
   async encrypt(payload: Record<string, unknown>,
                 randomBytes: (length: number) => Promise<Uint8Array>): Promise<Envelope> {
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
+        (Object.getPrototypeOf(payload) !== Object.prototype && Object.getPrototypeOf(payload) !== null)) {
+      throw new Error('Encrypted payload must be a JSON object');
+    }
     if (this.sentMessages >= maxMessages) throw new Error('Pair again to send more messages');
     const plaintext = utf8ToBytes(JSON.stringify(payload));
     if (plaintext.length > 32768) throw new Error('Message exceeds 32 KiB');

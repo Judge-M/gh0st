@@ -3,6 +3,7 @@
 import argparse
 import base64
 import json
+import math
 import os
 import re
 import sys
@@ -65,8 +66,8 @@ class PluggableGatewayAdapter:
             raise ValueError("Gateway did not return USD usage")
         total_tokens = int(usage["total_tokens"])
         cost_usd = float(usage.get("cost_usd", data.get("cost_usd")))
-        if total_tokens < 0 or cost_usd < 0:
-            raise ValueError("Gateway returned negative usage")
+        if total_tokens < 0 or not math.isfinite(cost_usd) or cost_usd < 0:
+            raise ValueError("Gateway returned invalid usage")
         return {
             "content": message.get("content") or "",
             "tool_calls": message.get("tool_calls") or [],
@@ -501,7 +502,7 @@ class EphemeralWorker:
             tokens_used=tokens_used, cost_usd=cost_usd,
             child_ticket_proposals=proposals,
         )
-        self.db.save_worker_report(report)
+        self.db.save_worker_report(report, claim_owner=claim_owner)
         if status == "success" and proposals:
             router = System1Router(self.db)
             for proposal in proposals:
@@ -535,6 +536,8 @@ def main() -> None:
     except Exception:
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":

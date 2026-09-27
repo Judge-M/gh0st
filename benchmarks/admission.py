@@ -17,21 +17,24 @@ from gh0st.models import QuotaRecord
 
 def measure(db_path: Path, samples: int) -> list[float]:
     db = StateLedger(f"sqlite:///{db_path}")
-    db.init_db()
-    db.create_task("admission_benchmark", "Quota preflight benchmark")
-    db.create_quota_record(QuotaRecord(
-        task_id="admission_benchmark", max_tokens_budget=100000,
-        max_cost_usd_budget=100,
-    ))
-    for _ in range(100):
-        db.get_quota_record("admission_benchmark")
-    durations = []
-    for _ in range(samples):
-        started = perf_counter_ns()
-        quota = db.get_quota_record("admission_benchmark")
-        assert quota.remaining_tokens >= 4096 and quota.remaining_usd >= 0.5
-        durations.append((perf_counter_ns() - started) / 1e6)
-    return sorted(durations)
+    try:
+        db.init_db()
+        db.create_task("admission_benchmark", "Quota preflight benchmark")
+        db.create_quota_record(QuotaRecord(
+            task_id="admission_benchmark", max_tokens_budget=100000,
+            max_cost_usd_budget=100,
+        ))
+        for _ in range(100):
+            db.get_quota_record("admission_benchmark")
+        durations = []
+        for _ in range(samples):
+            started = perf_counter_ns()
+            quota = db.get_quota_record("admission_benchmark")
+            assert quota.remaining_tokens >= 4096 and quota.remaining_usd >= 0.5
+            durations.append((perf_counter_ns() - started) / 1e6)
+        return sorted(durations)
+    finally:
+        db.close()
 
 
 def main() -> None:
